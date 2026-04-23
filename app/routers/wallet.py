@@ -1,0 +1,509 @@
+"""
+Wallet router — balances, deposit (via payment gateway), withdrawal, conversion.
+Exchange rates are admin-controlled via the ExchangeRate DB table.
+Deposit flow:
+  1. POST /wallet/deposit/initiate  →  get gateway redirect URL / client_secret
+  2. User completes payment on gateway
+  3. POST /wallet/deposit/verify    →  verify + credit wallet
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.database import get_db
+from app.schemas.wallet import DepositRequest, WithdrawRequest, ConvertRequest
+from app.models.wallet import WalletBalance, WalletTransaction
+from app.models.currency import Currency, ExchangeRate
+from app.models.user import User
+from app.dependencies import get_current_user
+from app.services.notification_service import create_notification
+from app.services.payment_service import (
+    initiate_deposit,
+    verify_deposit,
+    get_gateway_for_country,
+    generate_payment_reference,
+    PaystackError,
+    StripeError,
+    FlutterwaveError,
+)
+from app.config import settings
+
+router = APIRouter(prefix="/wallet", tags=["Wallet"])
+
+CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£", "CAD": "CA$", "AUD": "A$",
+    "NGN": "₦", "GHS": "GH₵", "KES": "KSh", "ZAR": "R",
+    "BTC": "₿", "ETH": "Ξ", "USDT": "₮", "USDC": "$",
+}
+
+
+def get_or_create_balance(db: Session, user_id: str, currency: str) -> WalletBalance:
+    balance = db.query(WalletBalance).filter(
+        WalletBalance.user_id == user_id, WalletBalance.currency == currency
+    ).first()
+    if not balance:
+        balance = WalletBalance(user_id=user_id, currency=currency, amount=0.0)
+        db.add(balance)
+        db.flush()
+    return balance
+
+
+def _get_exchange_rate(db: Session, from_code: str, to_code: str) -> float:
+    """
+    Get rate from admin-controlled ExchangeRate table.
+    Falls back to 1.0 (same currency) or raises if pair not found.
+    """
+    if from_code == to_code:
+        return 1.0
+
+    from_cur = db.query(Currency).filter(Currency.code == from_code, Currency.is_active == True).first()
+    to_cur = db.query(Currency).filter(Currency.code == to_code, Currency.is_active == True).first()
+
+    if not from_cur or not to_cur:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "CURRENCY_NOT_FOUND",
+                "message": f"Currency '{from_code}' or '{to_code}' is not active on this platform.",
+            },
+        )
+
+    rate_row = db.query(ExchangeRate).filter(
+        ExchangeRate.from_currency_id == from_cur.id,
+        ExchangeRate.to_currency_id == to_cur.id,
+        ExchangeRate.is_active == True,
+    ).first()
+
+    if not rate_row:
+        # Try inverse rate
+        inverse = db.query(ExchangeRate).filter(
+            ExchangeRate.from_currency_id == to_cur.id,
+            ExchangeRate.to_currency_id == from_cur.id,
+            ExchangeRate.is_active == True,
+        ).first()
+        if inverse:
+            spread = 1 + (inverse.spread_percent / 100)
+            return round((1 / inverse.rate) * spread, 8)
+
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "NO_EXCHANGE_RATE",
+                "message": f"No exchange rate configured for {from_code} → {to_code}. Contact support.",
+            },
+        )
+
+    spread = 1 + (rate_row.spread_percent / 100)
+    return round(rate_row.rate * spread, 8)
+
+
+# ─── Balance & history ────────────────────────────────────────────────────────
+
+@router.get("/balances")
+def get_balances(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    balances = db.query(WalletBalance).filter(WalletBalance.user_id == current_user.id).all()
+    return [
+        {
+            "id": str(b.id),
+            "currency": b.currency,
+            "amount": b.amount,
+            "pending_amount": b.pending_amount,
+            "symbol": CURRENCY_SYMBOLS.get(b.currency, b.currency),
+        }
+        for b in balances
+    ]
+
+
+@router.get("/transactions")
+def get_wallet_transactions(
+    type: Optional[str] = Query(None, description="Filter by type: deposit, withdrawal, conversion"),
+    currency: Optional[str] = None,
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(WalletTransaction).filter(WalletTransaction.user_id == current_user.id)
+    if type:
+        query = query.filter(WalletTransaction.type == type)
+    if currency:
+        query = query.filter(WalletTransaction.currency == currency.upper())
+    txns = query.order_by(WalletTransaction.created_at.desc()).offset(offset).limit(limit).all()
+    return [
+        {
+            "id": str(t.id),
+            "type": t.type,
+            "amount": t.amount,
+            "currency": t.currency,
+            "status": t.status,
+            "description": t.description,
+            "transaction_id": str(t.transaction_id) if t.transaction_id else None,
+            "method": t.method,
+            "gateway_reference": getattr(t, "gateway_reference", None),
+            "created_at": t.created_at,
+        }
+        for t in txns
+    ]
+
+
+# ─── Exchange rates ───────────────────────────────────────────────────────────
+
+@router.get("/exchange-rates")
+def get_exchange_rates(db: Session = Depends(get_db)):
+    """Returns all active admin-controlled exchange rates."""
+    rates = db.query(ExchangeRate).filter(ExchangeRate.is_active == True).all()
+    return [
+        {
+            "from": r.from_currency.code,
+            "to": r.to_currency.code,
+            "rate": r.rate,
+            "spread_percent": r.spread_percent,
+            "effective_rate": round(r.rate * (1 + r.spread_percent / 100), 8),
+            "updated_at": r.updated_at,
+        }
+        for r in rates
+        if r.from_currency and r.to_currency
+    ]
+
+
+@router.get("/rate")
+def get_rate(
+    from_currency: str,
+    to_currency: str,
+    db: Session = Depends(get_db),
+):
+    """Get exchange rate for a specific pair (spread included)."""
+    rate = _get_exchange_rate(db, from_currency.upper(), to_currency.upper())
+    return {
+        "from_currency": from_currency.upper(),
+        "to_currency": to_currency.upper(),
+        "rate": rate,
+        "note": "Rate includes platform spread.",
+    }
+
+
+# ─── Deposit ──────────────────────────────────────────────────────────────────
+
+@router.post("/deposit/initiate")
+def initiate_deposit_endpoint(
+    payload: DepositRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Step 1 of deposit: returns payment gateway redirect URL / client_secret.
+    The wallet is NOT credited until /deposit/verify is called.
+    """
+    if payload.amount <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AMOUNT", "message": "Deposit amount must be greater than zero."},
+        )
+
+    if payload.amount < 1:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "AMOUNT_TOO_SMALL", "message": "Minimum deposit amount is 1.00."},
+        )
+
+    currency_upper = payload.currency.upper()
+    active_currency = db.query(Currency).filter(
+        Currency.code == currency_upper, Currency.is_active == True
+    ).first()
+    if not active_currency:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "CURRENCY_NOT_SUPPORTED",
+                "message": f"'{currency_upper}' is not currently supported. Check /wallet/currencies for available currencies.",
+            },
+        )
+
+    callback_url = f"{settings.FRONTEND_URL}/wallet/deposit/callback"
+
+    try:
+        result = initiate_deposit(
+            user=current_user,
+            amount=payload.amount,
+            currency=currency_upper,
+            callback_url=callback_url,
+            db=db,
+            metadata={"user_id": str(current_user.id)},
+        )
+    except (PaystackError, StripeError, FlutterwaveError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "GATEWAY_ERROR", "message": str(e)},
+        )
+
+    # Record pending transaction
+    txn = WalletTransaction(
+        user_id=current_user.id,
+        type="deposit",
+        amount=payload.amount,
+        currency=currency_upper,
+        status="pending",
+        description=f"{result['gateway'].title()} deposit",
+        method=result["gateway"],
+    )
+    if hasattr(txn, "gateway_reference"):
+        txn.gateway_reference = result.get("reference", "")
+    db.add(txn)
+    db.commit()
+    db.refresh(txn)
+
+    return {
+        **result,
+        "wallet_transaction_id": str(txn.id),
+        "amount": payload.amount,
+        "currency": currency_upper,
+    }
+
+
+@router.post("/deposit/verify")
+def verify_deposit_endpoint(
+    gateway: str,
+    reference: str,
+    wallet_transaction_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Step 2 of deposit: verify with gateway and credit wallet on success.
+    Idempotent — safe to call multiple times with same reference.
+    """
+    # Check for existing completed transaction (idempotency)
+    if wallet_transaction_id:
+        existing = db.query(WalletTransaction).filter(
+            WalletTransaction.id == wallet_transaction_id,
+            WalletTransaction.user_id == current_user.id,
+        ).first()
+        if existing and existing.status == "completed":
+            return {"message": "Deposit already credited.", "status": "completed", "amount": existing.amount}
+
+    try:
+        result = verify_deposit(gateway=gateway, reference=reference, db=db)
+    except (PaystackError, StripeError, FlutterwaveError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "GATEWAY_VERIFICATION_FAILED", "message": str(e)},
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "UNKNOWN_GATEWAY", "message": str(e)},
+        )
+
+    if not result["success"]:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "PAYMENT_NOT_SUCCESSFUL",
+                "message": f"Payment was not completed. Gateway status: {result.get('status', 'unknown')}. Please retry or use a different payment method.",
+            },
+        )
+
+    # Credit wallet
+    balance = get_or_create_balance(db, current_user.id, result["currency"])
+    balance.amount += result["amount"]
+
+    # Update pending transaction or create a new completed one
+    if wallet_transaction_id:
+        txn = db.query(WalletTransaction).filter(
+            WalletTransaction.id == wallet_transaction_id,
+            WalletTransaction.user_id == current_user.id,
+        ).first()
+        if txn:
+            txn.status = "completed"
+            txn.amount = result["amount"]
+    else:
+        txn = WalletTransaction(
+            user_id=current_user.id,
+            type="deposit",
+            amount=result["amount"],
+            currency=result["currency"],
+            status="completed",
+            description=f"{gateway.title()} deposit verified",
+            method=gateway,
+        )
+        db.add(txn)
+
+    db.commit()
+
+    create_notification(
+        db, current_user.id,
+        "Deposit Successful",
+        f"Your deposit of {result['currency']} {result['amount']:.2f} was successful.",
+        "payment",
+    )
+
+    return {
+        "message": "Deposit successful. Wallet credited.",
+        "amount": result["amount"],
+        "currency": result["currency"],
+        "new_balance": balance.amount,
+    }
+
+
+# ─── Withdrawal ───────────────────────────────────────────────────────────────
+
+@router.post("/withdraw")
+def withdraw(
+    payload: WithdrawRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Request a withdrawal. Funds are moved to pending_amount immediately.
+    Admin reviews and processes via the payment gateway.
+    """
+    if payload.amount <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AMOUNT", "message": "Withdrawal amount must be greater than zero."},
+        )
+
+    currency_upper = payload.currency.upper()
+    balance = get_or_create_balance(db, current_user.id, currency_upper)
+
+    if balance.amount < payload.amount:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "INSUFFICIENT_BALANCE",
+                "message": (
+                    f"Your {currency_upper} balance ({balance.amount:.2f}) is insufficient for this withdrawal. "
+                    f"Requested: {payload.amount:.2f}."
+                ),
+            },
+        )
+
+    balance.amount -= payload.amount
+    balance.pending_amount = (balance.pending_amount or 0) + payload.amount
+
+    txn = WalletTransaction(
+        user_id=current_user.id,
+        type="withdrawal",
+        amount=payload.amount,
+        currency=currency_upper,
+        status="pending",
+        description=f"Withdrawal via {getattr(payload, 'method', 'bank')}",
+        method=getattr(payload, "method", "bank"),
+    )
+    db.add(txn)
+    db.commit()
+
+    create_notification(
+        db, current_user.id,
+        "Withdrawal Requested",
+        f"Withdrawal of {currency_upper} {payload.amount:.2f} is being processed. It typically takes 1–3 business days.",
+        "payment",
+    )
+
+    return {
+        "message": "Withdrawal request submitted successfully.",
+        "status": "pending",
+        "amount": payload.amount,
+        "currency": currency_upper,
+        "wallet_transaction_id": str(txn.id),
+    }
+
+
+# ─── Currency conversion ──────────────────────────────────────────────────────
+
+@router.post("/convert")
+def convert_currency(
+    payload: ConvertRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from_code = payload.from_currency.upper()
+    to_code = payload.to_currency.upper()
+
+    if from_code == to_code:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "SAME_CURRENCY", "message": "Source and target currencies must be different."},
+        )
+
+    if payload.amount <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AMOUNT", "message": "Conversion amount must be greater than zero."},
+        )
+
+    from_balance = get_or_create_balance(db, current_user.id, from_code)
+    if from_balance.amount < payload.amount:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "INSUFFICIENT_BALANCE",
+                "message": (
+                    f"Your {from_code} balance ({from_balance.amount:.2f}) is insufficient. "
+                    f"Requested: {payload.amount:.2f}."
+                ),
+            },
+        )
+
+    rate = _get_exchange_rate(db, from_code, to_code)
+    converted = round(payload.amount * rate, 8)
+
+    from_balance.amount -= payload.amount
+    to_balance = get_or_create_balance(db, current_user.id, to_code)
+    to_balance.amount += converted
+
+    txn = WalletTransaction(
+        user_id=current_user.id,
+        type="conversion",
+        amount=payload.amount,
+        currency=from_code,
+        status="completed",
+        description=f"Converted {from_code} {payload.amount:.4f} → {to_code} {converted:.4f} @ {rate}",
+    )
+    db.add(txn)
+    db.commit()
+
+    return {
+        "message": "Currency converted successfully.",
+        "from_currency": from_code,
+        "to_currency": to_code,
+        "original_amount": payload.amount,
+        "converted_amount": converted,
+        "rate_applied": rate,
+        "note": "Rate includes platform spread.",
+    }
+
+
+# ─── Supported currencies ─────────────────────────────────────────────────────
+
+@router.get("/currencies")
+def list_currencies(db: Session = Depends(get_db)):
+    """Returns admin-configured active currencies."""
+    currencies = db.query(Currency).filter(Currency.is_active == True).order_by(Currency.code).all()
+    return [
+        {
+            "code": c.code,
+            "name": c.name,
+            "symbol": c.symbol,
+            "type": c.type,
+            "decimal_places": c.decimal_places,
+        }
+        for c in currencies
+    ]
+
+
+@router.get("/gateway")
+def get_my_gateway(
+    currency: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Returns which payment gateway will be used for the current user's country + currency."""
+    gw = get_gateway_for_country(current_user.country_code or "", currency.upper(), db)
+    return {
+        "gateway": gw,
+        "country_code": current_user.country_code,
+        "currency": currency.upper(),
+    }
