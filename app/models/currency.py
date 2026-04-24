@@ -100,7 +100,7 @@ class Refund(Base):
     reason = Column(Text, nullable=False)
     admin_notes = Column(Text, nullable=True)
     status = Column(String(20), default="pending")    # pending | processing | completed | failed
-    processed_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    processed_by = Column(String, ForeignKey("users.id"), nullable=True)
     processed_at = Column(DateTime, nullable=True)
     gateway_reference = Column(String(200), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -140,5 +140,5 @@ class PlatformSettings(Base):
     platform_name = Column(String(100), default="MileVault")
     support_email = Column(String(255), default="support@milevault.com")
 
-    updated_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    updated_by = Column(String, ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
