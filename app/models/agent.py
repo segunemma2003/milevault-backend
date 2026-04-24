@@ -50,7 +50,7 @@ class Agent(Base):
     id_document_url = Column(String(500), nullable=True)   # S3 key
     status = Column(Enum(AgentStatus), default=AgentStatus.pending, nullable=False)
     rejection_reason = Column(Text, nullable=True)
-    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    approved_by = Column(String, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
     is_available = Column(Boolean, default=True)
     total_verifications = Column(Integer, default=0)

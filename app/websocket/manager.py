@@ -25,9 +25,9 @@ class ConnectionManager:
 
     async def _get_redis_async(self):
         try:
-            import aioredis
+            from redis.asyncio import from_url
             from app.config import settings
-            return await aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            return await from_url(settings.REDIS_URL, decode_responses=True)
         except Exception:
             return None
 
@@ -92,9 +92,9 @@ class ConnectionManager:
         Allows horizontal scaling (multiple server instances).
         """
         try:
-            import aioredis
+            from redis.asyncio import from_url
             from app.config import settings
-            r = await aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            r = await from_url(settings.REDIS_URL, decode_responses=True)
             pubsub = r.pubsub()
             await pubsub.psubscribe("ws:*")  # wildcard subscription
 
