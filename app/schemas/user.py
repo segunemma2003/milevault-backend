@@ -14,10 +14,13 @@ class UserOut(BaseModel):
     is_kyc_verified: bool
     is_active: bool
     is_email_verified: bool
+    is_admin: bool = False
+    is_agent: bool = False
     phone: Optional[str] = None
     location: Optional[str] = None
     website: Optional[str] = None
     bio: Optional[str] = None
+    country_code: Optional[str] = None
     completion_percentage: int = 60
     created_at: datetime
 

@@ -29,6 +29,81 @@ from app.routers import agents, admin, uploads
 logger = logging.getLogger("milevault")
 
 
+def _seed_admin() -> None:
+    """Create the platform admin account on first boot if it doesn't exist."""
+    try:
+        from app.database import SessionLocal
+        from app.models.user import User
+        from app.config import settings
+        from passlib.context import CryptContext
+
+        if not settings.ADMIN_PASSWORD:
+            return
+
+        db = SessionLocal()
+        try:
+            existing = db.query(User).filter(User.email == settings.ADMIN_EMAIL).first()
+            if existing:
+                if not existing.is_admin:
+                    existing.is_admin = True
+                    db.commit()
+                    logger.info(f"Admin flag set on existing user: {settings.ADMIN_EMAIL}")
+                return
+
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            import uuid
+            admin = User(
+                id=str(uuid.uuid4()),
+                first_name="MileVault",
+                last_name="Admin",
+                email=settings.ADMIN_EMAIL,
+                hashed_password=pwd_context.hash(settings.ADMIN_PASSWORD),
+                role="buyer",
+                is_admin=True,
+                is_active=True,
+                is_kyc_verified=True,
+                country_code="NG",
+            )
+            db.add(admin)
+            db.commit()
+            logger.info(f"Admin account created: {settings.ADMIN_EMAIL}")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning(f"Admin seed skipped: {exc}")
+
+
+def _seed_default_currencies() -> None:
+    """Ensure NGN and USD exist as active currencies on first boot."""
+    try:
+        from app.database import SessionLocal
+        from app.models.currency import Currency, CurrencyType
+
+        DEFAULTS = [
+            {"code": "NGN", "name": "Nigerian Naira",  "symbol": "₦", "type": CurrencyType.fiat, "decimal_places": 2, "is_base": False},
+            {"code": "USD", "name": "US Dollar",       "symbol": "$", "type": CurrencyType.fiat, "decimal_places": 2, "is_base": True},
+            {"code": "EUR", "name": "Euro",             "symbol": "€", "type": CurrencyType.fiat, "decimal_places": 2, "is_base": False},
+            {"code": "GBP", "name": "British Pound",   "symbol": "£", "type": CurrencyType.fiat, "decimal_places": 2, "is_base": False},
+            {"code": "GHS", "name": "Ghanaian Cedi",   "symbol": "₵", "type": CurrencyType.fiat, "decimal_places": 2, "is_base": False},
+        ]
+
+        db = SessionLocal()
+        try:
+            added = 0
+            for c in DEFAULTS:
+                exists = db.query(Currency).filter(Currency.code == c["code"]).first()
+                if not exists:
+                    db.add(Currency(**c))
+                    added += 1
+            if added:
+                db.commit()
+                logger.info(f"Seeded {added} default currencies.")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning(f"Currency seed skipped: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -37,6 +112,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         import traceback
         logger.error(f"DB table creation failed (degraded mode): {exc}\n{traceback.format_exc()}")
+
+    _seed_admin()
+    _seed_default_currencies()
 
     # Start Redis pub/sub listener for WebSocket fan-out
     try:

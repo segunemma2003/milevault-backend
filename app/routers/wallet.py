@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.database import get_db
-from app.schemas.wallet import DepositRequest, WithdrawRequest, ConvertRequest
+from app.schemas.wallet import DepositRequest, WithdrawRequest, ConvertRequest, TransferRequest
 from app.models.wallet import WalletBalance, WalletTransaction
 from app.models.currency import Currency, ExchangeRate
 from app.models.user import User
@@ -383,14 +383,15 @@ def withdraw(
     balance.amount -= payload.amount
     balance.pending_amount = (balance.pending_amount or 0) + payload.amount
 
+    bank_note = f" | {payload.bank_details}" if payload.bank_details else ""
     txn = WalletTransaction(
         user_id=current_user.id,
         type="withdrawal",
         amount=payload.amount,
         currency=currency_upper,
         status="pending",
-        description=f"Withdrawal via {getattr(payload, 'method', 'bank')}",
-        method=getattr(payload, "method", "bank"),
+        description=f"Withdrawal via {payload.method}{bank_note}",
+        method=payload.method,
     )
     db.add(txn)
     db.commit()
@@ -408,6 +409,102 @@ def withdraw(
         "amount": payload.amount,
         "currency": currency_upper,
         "wallet_transaction_id": str(txn.id),
+    }
+
+
+# ─── Wallet-to-wallet transfer ───────────────────────────────────────────────
+
+@router.post("/transfer")
+def transfer_funds(
+    payload: TransferRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send funds from your wallet to another MileVault user by email."""
+    if payload.amount <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AMOUNT", "message": "Transfer amount must be greater than zero."},
+        )
+
+    if payload.recipient_email.lower() == current_user.email.lower():
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "SELF_TRANSFER", "message": "You cannot transfer funds to yourself."},
+        )
+
+    currency_upper = payload.currency.upper()
+
+    recipient = db.query(User).filter(
+        User.email == payload.recipient_email.lower(),
+        User.is_active == True,
+    ).first()
+    if not recipient:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "RECIPIENT_NOT_FOUND", "message": "No active MileVault account found with that email address."},
+        )
+
+    sender_balance = get_or_create_balance(db, current_user.id, currency_upper)
+    if sender_balance.amount < payload.amount:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "INSUFFICIENT_BALANCE",
+                "message": f"Your {currency_upper} balance ({sender_balance.amount:.2f}) is insufficient for this transfer.",
+            },
+        )
+
+    # Debit sender
+    sender_balance.amount -= payload.amount
+
+    # Credit recipient
+    recipient_balance = get_or_create_balance(db, recipient.id, currency_upper)
+    recipient_balance.amount += payload.amount
+
+    note_text = f" — {payload.note}" if payload.note else ""
+
+    sender_txn = WalletTransaction(
+        user_id=current_user.id,
+        type="transfer_out",
+        amount=payload.amount,
+        currency=currency_upper,
+        status="completed",
+        description=f"Transfer to {recipient.email}{note_text}",
+        method="internal",
+    )
+    recipient_txn = WalletTransaction(
+        user_id=recipient.id,
+        type="transfer_in",
+        amount=payload.amount,
+        currency=currency_upper,
+        status="completed",
+        description=f"Transfer from {current_user.email}{note_text}",
+        method="internal",
+    )
+    db.add(sender_txn)
+    db.add(recipient_txn)
+    db.commit()
+
+    create_notification(
+        db, current_user.id,
+        "Transfer Sent",
+        f"You sent {currency_upper} {payload.amount:.2f} to {recipient.email}.",
+        "payment",
+    )
+    create_notification(
+        db, recipient.id,
+        "Funds Received",
+        f"You received {currency_upper} {payload.amount:.2f} from {current_user.email}.",
+        "payment",
+    )
+
+    return {
+        "message": "Transfer completed successfully.",
+        "amount": payload.amount,
+        "currency": currency_upper,
+        "recipient": recipient.email,
+        "sender_new_balance": sender_balance.amount,
     }
 
 

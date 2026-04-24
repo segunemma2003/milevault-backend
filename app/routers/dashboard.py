@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.transaction import Transaction
@@ -80,3 +82,89 @@ def get_dashboard_stats(
         "available_to_withdraw": usd_balance,
         "recent_transactions": recent,
     }
+
+
+@router.get("/analytics")
+def get_user_analytics(
+    days: int = Query(30, ge=7, le=90),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the authenticated user's own time-series analytics for the last N days."""
+    user_id = current_user.id
+    now = datetime.utcnow()
+    start = now - timedelta(days=days)
+
+    # Build a date-keyed scaffold so every day appears even with zero values
+    date_range = [(start + timedelta(days=i)).date() for i in range(days + 1)]
+    scaffold = {d: 0.0 for d in date_range}
+
+    # --- Transaction volume (sum of amounts by day) ---
+    tx_rows = (
+        db.query(
+            func.date(Transaction.created_at).label("day"),
+            func.coalesce(func.sum(Transaction.amount), 0).label("total"),
+        )
+        .filter(
+            (Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id),
+            Transaction.created_at >= start,
+        )
+        .group_by(func.date(Transaction.created_at))
+        .all()
+    )
+    tx_by_day = {**scaffold}
+    for row in tx_rows:
+        tx_by_day[row.day] = float(row.total)
+
+    # --- Wallet deposits by day ---
+    dep_rows = (
+        db.query(
+            func.date(WalletTransaction.created_at).label("day"),
+            func.coalesce(func.sum(WalletTransaction.amount), 0).label("total"),
+        )
+        .filter(
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "deposit",
+            WalletTransaction.status == "completed",
+            WalletTransaction.created_at >= start,
+        )
+        .group_by(func.date(WalletTransaction.created_at))
+        .all()
+    )
+    dep_by_day = {**scaffold}
+    for row in dep_rows:
+        dep_by_day[row.day] = float(row.total)
+
+    # --- Wallet withdrawals by day ---
+    wd_rows = (
+        db.query(
+            func.date(WalletTransaction.created_at).label("day"),
+            func.coalesce(func.sum(WalletTransaction.amount), 0).label("total"),
+        )
+        .filter(
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "withdrawal",
+            WalletTransaction.created_at >= start,
+        )
+        .group_by(func.date(WalletTransaction.created_at))
+        .all()
+    )
+    wd_by_day = {**scaffold}
+    for row in wd_rows:
+        wd_by_day[row.day] = float(row.total)
+
+    def _fmt(d):
+        return d.strftime("%b %-d")
+
+    series = [
+        {
+            "date": str(d),
+            "label": _fmt(d),
+            "transaction_volume": tx_by_day.get(d, 0.0),
+            "deposits": dep_by_day.get(d, 0.0),
+            "withdrawals": wd_by_day.get(d, 0.0),
+        }
+        for d in date_range
+    ]
+
+    return {"days": days, "series": series}

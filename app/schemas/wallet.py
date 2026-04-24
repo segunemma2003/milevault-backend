@@ -37,9 +37,17 @@ class WithdrawRequest(BaseModel):
     amount: float
     currency: str = "USD"
     method: str = "bank"
+    bank_details: str = ""
 
 
 class ConvertRequest(BaseModel):
     from_currency: str
     to_currency: str
     amount: float
+
+
+class TransferRequest(BaseModel):
+    recipient_email: str
+    amount: float
+    currency: str = "USD"
+    note: str = ""

@@ -16,4 +16,4 @@ RUN python -c "from app.main import app; print('Import check passed')"
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python -c 'from app.database import create_tables; create_tables(); print(\"DB tables ready\")' && python scripts/seed_admin.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -c 'from app.database import create_tables; create_tables(); print(\"DB tables ready\")' && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

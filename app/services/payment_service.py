@@ -127,6 +127,7 @@ def paystack_initiate_deposit(
         "authorization_url": data["data"]["authorization_url"],
         "access_code": data["data"]["access_code"],
         "reference": data["data"]["reference"],
+        "public_key": settings.PAYSTACK_PUBLIC_KEY,
     }
 
 
