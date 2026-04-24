@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Body
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional, Any, Dict
 from app.database import get_db
@@ -82,6 +83,16 @@ def transaction_to_dict(tx: Transaction) -> dict:
         "status": tx.status,
         "buyer_id": tx.buyer_id,
         "seller_id": tx.seller_id,
+        "initiated_by_user_id": getattr(tx, "initiated_by_user_id", None),
+        "initiated_as": (
+            "buyer"
+            if not getattr(tx, "initiated_by_user_id", None) or tx.initiated_by_user_id == tx.buyer_id
+            else (
+                "seller"
+                if tx.seller_id and tx.initiated_by_user_id == tx.seller_id
+                else None
+            )
+        ),
         "buyer": {
             "id": buyer.id,
             "first_name": buyer.first_name,
@@ -132,10 +143,28 @@ def create_transaction(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Find seller by email if provided
-    seller = None
-    if payload.counterparty_email:
-        seller = db.query(User).filter(User.email == payload.counterparty_email).first()
+    raw_email = (payload.counterparty_email or "").strip()
+    email_norm = raw_email.lower() if raw_email else ""
+    counterparty = None
+    if email_norm:
+        counterparty = db.query(User).filter(func.lower(User.email) == email_norm).first()
+
+    if counterparty and counterparty.id == current_user.id:
+        raise HTTPException(status_code=422, detail={"message": "You cannot create a transaction with yourself as the counterparty."})
+
+    if payload.initiated_as == "seller":
+        if not counterparty:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "When you initiate as the seller, the counterparty must be a registered MileVault user (the buyer who will fund the work).",
+                },
+            )
+        buyer_id = counterparty.id
+        seller_id = current_user.id
+    else:
+        buyer_id = current_user.id
+        seller_id = counterparty.id if counterparty else None
 
     tx = Transaction(
         title=payload.title,
@@ -143,9 +172,10 @@ def create_transaction(
         amount=payload.amount,
         currency=payload.currency,
         type=payload.type,
-        buyer_id=current_user.id,
-        seller_id=seller.id if seller else None,
-        counterparty_email=payload.counterparty_email,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        initiated_by_user_id=current_user.id,
+        counterparty_email=raw_email or None,
         expected_completion_date=payload.expected_completion_date,
         service_fee_payment=payload.service_fee_payment,
         buyer_fee_ratio=payload.buyer_fee_ratio,
@@ -193,11 +223,13 @@ def create_transaction(
     db.commit()
     db.refresh(tx)
 
-    if seller:
+    invitee_id = seller_id if payload.initiated_as == "buyer" else buyer_id
+    if invitee_id and invitee_id != current_user.id:
         create_notification(
-            db, seller.id,
-            "New Transaction Invitation",
-            f"{current_user.first_name + ' ' + current_user.last_name} invited you to a transaction: {tx.title}",
+            db,
+            invitee_id,
+            "New transaction invitation",
+            f"{current_user.first_name} {current_user.last_name} invited you to a transaction: {tx.title}",
             "transaction",
             related_item_id=tx.id,
             related_item_type="transaction",
@@ -279,7 +311,11 @@ def cancel_transaction(
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    if tx.buyer_id != current_user.id:
+    initiator = getattr(tx, "initiated_by_user_id", None)
+    if initiator:
+        if current_user.id != initiator:
+            raise HTTPException(status_code=403, detail="Only the person who sent this invitation can cancel it")
+    elif tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can cancel")
 
     tx.status = "cancelled"
@@ -369,7 +405,7 @@ def update_milestone(
 
 
 # ══════════════════════════════════════════════════════════════════
-#  SELLER: Accept transaction invite
+#  Counterparty: Accept transaction invite (buyer or seller initiated)
 # ══════════════════════════════════════════════════════════════════
 
 @router.post("/{transaction_id}/accept")
@@ -381,21 +417,48 @@ def accept_transaction(
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    if tx.seller_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the invited seller can accept")
     if tx.status not in ("pending_acceptance", "pending_approval"):
         raise HTTPException(status_code=409, detail=f"Cannot accept transaction in status '{tx.status}'")
+
+    initiator = getattr(tx, "initiated_by_user_id", None)
+    if initiator:
+        if current_user.id == initiator:
+            raise HTTPException(status_code=403, detail="You cannot accept your own invitation")
+        if current_user.id not in (tx.buyer_id, tx.seller_id):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if not tx.buyer_id or not tx.seller_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Both buyer and seller must be linked before this invitation can be accepted.",
+            )
+    else:
+        if tx.seller_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Only the invited seller can accept")
 
     from app.services.platform_timeline import get_funding_deadline_days
 
     tx.status = "funding_in_progress"
     tx.funding_deadline = datetime.utcnow() + timedelta(days=get_funding_deadline_days(db))
-    create_notification(
-        db, tx.buyer_id,
-        "Seller Accepted Your Transaction",
-        f"{current_user.first_name} accepted '{tx.title}'. Please fund the milestones to begin.",
-        "transaction", related_item_id=tx.id, related_item_type="transaction",
-    )
+    if current_user.id == tx.seller_id:
+        create_notification(
+            db,
+            tx.buyer_id,
+            "Invitation accepted",
+            f"{current_user.first_name} accepted '{tx.title}'. Please fund the milestones to begin.",
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
+        )
+    else:
+        create_notification(
+            db,
+            tx.seller_id,
+            "Invitation accepted",
+            f"{current_user.first_name} accepted '{tx.title}'. They can fund milestones to start escrow for your work.",
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
+        )
     db.commit()
     try:
         from app.services.tasks import enforce_funding_deadline
@@ -403,7 +466,7 @@ def accept_transaction(
         enforce_funding_deadline.apply_async(args=[tx.id], eta=tx.funding_deadline)
     except Exception:
         pass
-    return {"message": "Transaction accepted. Buyer can now fund milestones."}
+    return {"message": "Invitation accepted. Funding can begin when the buyer funds milestones."}
 
 
 @router.post("/{transaction_id}/decline")
@@ -416,15 +479,26 @@ def decline_transaction(
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    if tx.seller_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the invited seller can decline")
+    initiator = getattr(tx, "initiated_by_user_id", None)
+    if initiator:
+        if current_user.id == initiator:
+            raise HTTPException(status_code=403, detail="Use cancel to withdraw your invitation")
+        if current_user.id not in (tx.buyer_id, tx.seller_id):
+            raise HTTPException(status_code=403, detail="Access denied")
+    else:
+        if tx.seller_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Only the invited seller can decline")
 
     tx.status = "cancelled"
+    notify_id = initiator or tx.buyer_id
     create_notification(
-        db, tx.buyer_id,
-        "Transaction Declined",
+        db,
+        notify_id,
+        "Transaction declined",
         f"{current_user.first_name} declined '{tx.title}'." + (f" Reason: {reason}" if reason else ""),
-        "transaction", related_item_id=tx.id, related_item_type="transaction",
+        "transaction",
+        related_item_id=tx.id,
+        related_item_type="transaction",
     )
     db.commit()
     return {"message": "Transaction declined."}

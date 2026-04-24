@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 from datetime import datetime
 from app.schemas.user import UserPublic
 
@@ -106,6 +106,16 @@ class TransactionCreate(BaseModel):
     counterparty_email: Optional[str] = None
     supporting_url: Optional[str] = None
     milestones: Optional[List[MilestoneCreate]] = []
+    # "buyer" = I am the buyer (I will fund); counterparty is seller. "seller" = I am the seller; counterparty must be a registered buyer who will fund.
+    initiated_as: Literal["buyer", "seller"] = "buyer"
+
+    @model_validator(mode="after")
+    def counterparty_rules(self):
+        if self.initiated_as == "seller":
+            em = (self.counterparty_email or "").strip()
+            if not em:
+                raise ValueError("Counterparty email is required when you initiate as the seller (the buyer must be invited by email).")
+        return self
 
 
 class TransactionUpdate(BaseModel):

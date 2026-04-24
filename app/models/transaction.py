@@ -21,6 +21,8 @@ class Transaction(Base):
     # → disputed → refunded | cancelled
     buyer_id = Column(String, ForeignKey("users.id"), nullable=False)
     seller_id = Column(String, ForeignKey("users.id"), nullable=True)
+    # User who created the invitation (accept/decline is the other party; cancel is initiator)
+    initiated_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
     counterparty_email = Column(String(255), nullable=True)
     supporting_url = Column(String, nullable=True)
     contract_signed = Column(Boolean, default=False)
