@@ -1,3 +1,8 @@
+"""
+Transaction chat and DMs.
+
+Transaction messages are append-only (POST only): no edit endpoint — preserves dispute audit integrity.
+"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List

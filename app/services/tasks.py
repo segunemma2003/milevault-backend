@@ -180,6 +180,12 @@ def auto_release_milestone(self, milestone_id: str) -> dict:
         if milestone.auto_release_at and datetime.utcnow() < milestone.auto_release_at:
             return {"status": "not_yet_due"}
 
+        from app.services.delivery_validation import delivery_meets_auto_release_bar
+
+        if not delivery_meets_auto_release_bar(milestone):
+            logger.warning("auto_release_milestone skipped: delivery failed minimum validation for %s", milestone_id)
+            return {"status": "skipped", "reason": "delivery_failed_auto_release_bar"}
+
         tx = db.query(Transaction).filter(Transaction.id == milestone.transaction_id).first()
         if not tx:
             return {"status": "tx_not_found"}
@@ -275,114 +281,14 @@ def enforce_funding_deadline(self, transaction_id: str) -> dict:
     - Case B/C: at least one funded → refund only incomplete-milestone (partial) locks; funded milestones proceed.
     """
     from app.database import SessionLocal
-    from datetime import datetime
-    from app.models.transaction import Transaction, Milestone
-    from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
-    from app.services.notification_service import create_notification
+    from app.services.funding_deadline_enforcement import enforce_funding_deadline_if_due
 
     db = SessionLocal()
     try:
-        tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
-        if not tx:
-            return {"status": "not_found"}
-        if tx.status in ("completed", "cancelled", "refunded"):
-            return {"status": "skipped", "reason": tx.status}
-        if not tx.funding_deadline or datetime.utcnow() < tx.funding_deadline:
-            return {"status": "not_yet_due"}
-
-        milestones = db.query(Milestone).filter(Milestone.transaction_id == tx.id).all()
-        any_fully_funded = any(m.is_funded for m in milestones)
-
-        def refund_milestone_escrow_to_buyer(m: Milestone) -> float:
-            amt = float(m.funded_amount or 0)
-            if amt <= 0:
-                return 0.0
-            currency = m.currency or tx.currency
-            buyer_balance = db.query(WalletBalance).filter(
-                WalletBalance.user_id == tx.buyer_id,
-                WalletBalance.currency == currency,
-            ).first()
-            if buyer_balance:
-                buyer_balance.escrow_amount = max(0.0, round((buyer_balance.escrow_amount or 0) - amt, 8))
-                buyer_balance.amount = round((buyer_balance.amount or 0) + amt, 8)
-            db.add(
-                LedgerEntry(
-                    debit_user_id=tx.buyer_id,
-                    credit_user_id=tx.buyer_id,
-                    debit_account="escrow",
-                    credit_account="available",
-                    amount=amt,
-                    currency=currency,
-                    reference_type="refund",
-                    reference_id=m.id,
-                    description=f"Funding deadline refund for milestone '{m.title}'",
-                )
-            )
-            db.add(
-                WalletTransaction(
-                    user_id=tx.buyer_id,
-                    type="escrow_refund",
-                    amount=amt,
-                    currency=currency,
-                    status="completed",
-                    transaction_id=tx.id,
-                    milestone_id=m.id,
-                    description=f"Deadline refund: {m.title}",
-                )
-            )
-            m.funded_amount = 0.0
-            m.is_funded = False
-            m.status = "pending"
-            return amt
-
-        if not any_fully_funded:
-            refunded = 0.0
-            for m in milestones:
-                refunded += refund_milestone_escrow_to_buyer(m)
-            tx.funded_milestones = 0
-            tx.status = "cancelled"
-            tx.funding_deadline = None
-            create_notification(
-                db,
-                tx.buyer_id,
-                "Funding deadline — transaction cancelled",
-                f"'{tx.title}' had no fully funded milestones by the deadline. Held funds were returned to your wallet.",
-                "transaction",
-                related_item_id=tx.id,
-                related_item_type="transaction",
-            )
-            if tx.seller_id:
-                create_notification(
-                    db,
-                    tx.seller_id,
-                    "Transaction cancelled (funding deadline)",
-                    f"'{tx.title}' was cancelled because no milestone was fully funded in time.",
-                    "transaction",
-                    related_item_id=tx.id,
-                    related_item_type="transaction",
-                )
-            from app.services.agent_fee_service import refund_held_agent_fees_for_transaction
-
-            refund_held_agent_fees_for_transaction(db, tx)
+        out = enforce_funding_deadline_if_due(db, transaction_id)
+        if out.get("commit"):
             db.commit()
-            return {"status": "cancelled", "refunded": refunded}
-
-        # At least one funded milestone: refund partials on incomplete milestones only
-        for m in milestones:
-            if not m.is_funded and (m.funded_amount or 0) > 0:
-                refund_milestone_escrow_to_buyer(m)
-        tx.funding_deadline = None
-        create_notification(
-            db,
-            tx.buyer_id,
-            "Funding deadline — partial refunds",
-            f"Unfunded portions on '{tx.title}' were returned to your wallet. Funded milestones are unchanged.",
-            "transaction",
-            related_item_id=tx.id,
-            related_item_type="transaction",
-        )
-        db.commit()
-        return {"status": "partial_refunds", "transaction_id": transaction_id}
+        return out
     except Exception as exc:
         db.rollback()
         raise self.retry(exc=exc)
@@ -477,6 +383,8 @@ def expire_stale_invitations(self) -> dict:
         )
         n = 0
         for tx in txs:
+            # Deterministic: pending_approval never had an active agent engagement on-platform;
+            # always refund any stray held agent fee rows before cancel (no-op if none).
             refund_held_agent_fees_for_transaction(db, tx)
             tx.status = "cancelled"
             create_notification(

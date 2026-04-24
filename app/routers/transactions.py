@@ -287,6 +287,13 @@ def get_transaction(
         raise HTTPException(status_code=404, detail="Transaction not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
+    if tx.status in ("funding_in_progress", "partially_funded", "active", "approved"):
+        from app.services.funding_deadline_enforcement import enforce_funding_deadline_if_due
+
+        out = enforce_funding_deadline_if_due(db, transaction_id)
+        if out.get("commit"):
+            db.commit()
+        tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     return transaction_to_dict(tx)
 
 
@@ -543,6 +550,12 @@ def fund_milestone(
     Buyer funds a milestone (full or partial). Funds stay inactive until the milestone is 100% funded.
     Transaction becomes Active when ≥1 milestone is fully funded.
     """
+    from app.services.funding_deadline_enforcement import enforce_funding_deadline_if_due
+
+    fd_out = enforce_funding_deadline_if_due(db, transaction_id)
+    if fd_out.get("commit"):
+        db.commit()
+
     if current_user.wallet_frozen:
         raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
 
@@ -855,9 +868,9 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         seller = db.query(User).filter(User.id == tx.seller_id).first()
         if seller:
             seller.total_volume = round((seller.total_volume or 0) + amount, 2)
-        from app.services.agent_fee_service import release_held_agent_fees_for_transaction
+        from app.services.agent_fee_service import settle_held_agent_fees_on_transaction_completed
 
-        release_held_agent_fees_for_transaction(db, tx)
+        settle_held_agent_fees_on_transaction_completed(db, tx)
 
     create_notification(
         db, tx.seller_id,

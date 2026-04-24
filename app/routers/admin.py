@@ -12,8 +12,15 @@ from app.dependencies import get_current_admin
 from app.models.user import User
 from app.models.currency import Currency, ExchangeRate, PaymentGateway, Refund, CurrencyType, PaymentGatewayName, PlatformSettings
 from app.models.agent import (
-    Agent, AgentStatus, AgentRequest, AgentRequestStatus,
-    AgentSubscriptionPlan, AgentSubscription, AgentServiceTier, AgentEarning,
+    Agent,
+    AgentStatus,
+    AgentRequest,
+    AgentRequestMessage,
+    AgentRequestStatus,
+    AgentSubscriptionPlan,
+    AgentSubscription,
+    AgentServiceTier,
+    AgentEarning,
 )
 from app.models.transaction import Transaction, Milestone
 from app.models.dispute import Dispute, DisputeDocument
@@ -1017,6 +1024,7 @@ def admin_get_dispute(
 
     # Agent info (if requested)
     agent_info = None
+    agent_thread_messages = []
     if tx.agent_request:
         req = tx.agent_request
         agent_info = {
@@ -1029,6 +1037,22 @@ def admin_get_dispute(
             } if req.agent else None,
             "evidence_s3_keys": req.evidence_s3_keys or [],
         }
+        msgs = (
+            db.query(AgentRequestMessage)
+            .filter(AgentRequestMessage.agent_request_id == req.id)
+            .order_by(AgentRequestMessage.created_at.asc())
+            .all()
+        )
+        agent_thread_messages = [
+            {
+                "id": str(m.id),
+                "author_user_id": str(m.author_user_id),
+                "author_role": m.author_role,
+                "body": m.body,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in msgs
+        ]
 
     return {
         "dispute": {
@@ -1086,6 +1110,7 @@ def admin_get_dispute(
             for doc in dispute.documents
         ],
         "agent": agent_info,
+        "agent_thread_messages": agent_thread_messages,
     }
 
 
@@ -1094,6 +1119,10 @@ def admin_update_dispute(
     dispute_id: str,
     new_status: str = Body(...),
     resolution: Optional[str] = Body(None),
+    agent_fee_action: Optional[str] = Body(
+        None,
+        description="On resolve: refund_buyer | release_agent | omit for default (pay only if agent completed verification)",
+    ),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
@@ -1102,6 +1131,11 @@ def admin_update_dispute(
         raise HTTPException(
             status_code=422,
             detail={"error": "INVALID_STATUS", "message": f"Status must be one of: {valid}"},
+        )
+    if agent_fee_action is not None and agent_fee_action not in ("refund_buyer", "release_agent"):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AGENT_FEE_ACTION", "message": "agent_fee_action must be refund_buyer, release_agent, or null."},
         )
 
     dispute = db.query(Dispute).filter(Dispute.id == dispute_id).first()
@@ -1112,6 +1146,7 @@ def admin_update_dispute(
     if resolution:
         dispute.resolution = resolution
 
+    fee_out = None
     tx = dispute.transaction
     if new_status in ("resolved", "closed") and tx:
         tx.status = "completed" if new_status == "resolved" else tx.status
@@ -1123,12 +1158,16 @@ def admin_update_dispute(
                 + (f" Resolution: {resolution}" if resolution else ""),
             )
         if new_status == "resolved":
-            from app.services.agent_fee_service import release_held_agent_fees_after_dispute_resolved
+            from app.services.agent_fee_service import apply_agent_fee_policy_after_dispute
 
-            release_held_agent_fees_after_dispute_resolved(db, tx)
+            fee_out = apply_agent_fee_policy_after_dispute(db, tx, agent_fee_action)
 
     db.commit()
-    return {"message": f"Dispute updated to '{new_status}'.", "dispute_id": dispute_id}
+    return {
+        "message": f"Dispute updated to '{new_status}'.",
+        "dispute_id": dispute_id,
+        "agent_fee_policy": fee_out,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1751,6 +1790,7 @@ def list_agent_earnings(
             "platform_cut": e.platform_cut,
             "currency": e.currency,
             "status": e.status,
+            "admin_payout_approved": bool(getattr(e, "admin_payout_approved", False)),
             "paid_at": e.paid_at.isoformat() if e.paid_at else None,
             "notes": e.notes,
             "created_at": e.created_at.isoformat() if e.created_at else None,
@@ -1758,7 +1798,7 @@ def list_agent_earnings(
     return {"earnings": result, "total": len(result)}
 
 
-@router.post("/agent-earnings/{earning_id}/payout", summary="Admin marks an agent earning as paid")
+@router.post("/agent-earnings/{earning_id}/payout", summary="Admin approves payout (ledger) for held earnings, or legacy mark-paid")
 def process_agent_payout(
     earning_id: str,
     notes: Optional[str] = Body(None),
@@ -1771,19 +1811,39 @@ def process_agent_payout(
     if earning.status == "paid":
         raise HTTPException(status_code=409, detail={"error": "ALREADY_PAID", "message": "This earning has already been paid out."})
 
+    if earning.status == "held":
+        from app.services.agent_fee_service import admin_force_payout_held_earning
+
+        admin_force_payout_held_earning(db, earning, str(admin.id))
+        if notes:
+            earning.notes = notes
+        agent_user = earning.agent.user if earning.agent else None
+        if agent_user:
+            _notify(
+                db,
+                str(agent_user.id),
+                "Payout Processed",
+                f"Your payout of {earning.currency} {earning.agent_payout:.2f} has been released from escrow to your wallet."
+                + (f" Notes: {notes}" if notes else ""),
+            )
+        db.commit()
+        return {"message": f"Payout of {earning.currency} {earning.agent_payout:.2f} released.", "earning_id": earning_id}
+
+    # Legacy rows (e.g. admin-assigned without ledger hold): bookkeeping-only mark paid
     earning.status = "paid"
     earning.paid_at = datetime.utcnow()
     earning.notes = notes
-
-    # Update agent's total earnings
     if earning.agent:
         earning.agent.total_earnings = (earning.agent.total_earnings or 0) + earning.agent_payout
-
     agent_user = earning.agent.user if earning.agent else None
     if agent_user:
-        _notify(db, str(agent_user.id), "Payout Processed",
-                f"Your payout of {earning.currency} {earning.agent_payout:.2f} has been processed." +
-                (f" Notes: {notes}" if notes else ""))
+        _notify(
+            db,
+            str(agent_user.id),
+            "Payout Processed",
+            f"Your payout of {earning.currency} {earning.agent_payout:.2f} has been processed (legacy record)."
+            + (f" Notes: {notes}" if notes else ""),
+        )
     db.commit()
     return {"message": f"Payout of {earning.currency} {earning.agent_payout:.2f} marked as paid.", "earning_id": earning_id}
 

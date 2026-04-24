@@ -183,6 +183,10 @@ class AgentEarning(Base):
     status = Column(String(20), default="pending")
     paid_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
+    # Payout only after agent marked request completed OR admin explicitly approves (dispute / manual).
+    admin_payout_approved = Column(Boolean, default=False)
+    admin_payout_approved_at = Column(DateTime, nullable=True)
+    admin_payout_approved_by = Column(String, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     agent = relationship("Agent", back_populates="earnings")

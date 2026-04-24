@@ -664,7 +664,6 @@ def platform_info(db: Session = Depends(get_db)):
         "invite_expiry_days": get_invite_expiry_days(db),
         "stale_activity_warn_days": get_stale_activity_warn_days(db),
         "ledger_model": "double_entry",
-        "ledger_fields": ["debit_user_id", "credit_user_id", "debit_account", "credit_account", "amount", "reference_type", "reference_id"],
         "custody_notice": (
             "Customer funds for escrow are segregated in ledger accounts (buyer available / buyer escrow / seller available). "
             "Deposits and payouts are processed through configured payment gateways (e.g. Paystack where enabled). "

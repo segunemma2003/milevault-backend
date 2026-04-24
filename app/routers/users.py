@@ -16,6 +16,17 @@ def get_profile(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+@router.get("/me/deal-limits")
+def get_my_deal_limits(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Max deal size when you are a party, from reputation + platform cap (no internal fraud-rule detail)."""
+    from app.services.reputation_limits import public_deal_limits_for_user
+
+    return public_deal_limits_for_user(db, current_user)
+
+
 @router.put("/me", response_model=UserOut)
 def update_profile(
     payload: UpdateProfileRequest,
