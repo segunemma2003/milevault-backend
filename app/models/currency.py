@@ -32,7 +32,7 @@ class Currency(Base):
     decimal_places = Column(Integer, default=2)
     is_active = Column(Boolean, default=True)
     is_base = Column(Boolean, default=False)  # One base currency (USD) for rate reference
-    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -50,7 +50,7 @@ class ExchangeRate(Base):
     rate = Column(Float, nullable=False)           # 1 from = rate * to
     spread_percent = Column(Float, default=0.5)   # Platform spread (0.5%)
     is_active = Column(Boolean, default=True)
-    set_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    set_by = Column(String, ForeignKey("users.id"), nullable=True)
     valid_from = Column(DateTime, default=datetime.utcnow)
     valid_to = Column(DateTime, nullable=True)    # None = indefinite
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -96,7 +96,7 @@ class Refund(Base):
     dispute_id = Column(UUID(as_uuid=True), ForeignKey("disputes.id"), nullable=True)
     amount = Column(Float, nullable=False)
     currency = Column(String(10), nullable=False)
-    refund_to = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)   # Who gets the money
+    refund_to = Column(String, ForeignKey("users.id"), nullable=False)   # Who gets the money
     reason = Column(Text, nullable=False)
     admin_notes = Column(Text, nullable=True)
     status = Column(String(20), default="pending")    # pending | processing | completed | failed
