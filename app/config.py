@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from typing import List
 import json
 
@@ -32,9 +33,12 @@ class Settings(BaseSettings):
     REDIS_CELERY_DB: int = 1           # Celery uses DB 1
     IDEMPOTENCY_TTL: int = 86400       # 24 hours
 
-    # Celery
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    # Celery — leave blank in Railway; auto-derived from REDIS_URL below
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
+
+    # Admin seed
+    ADMIN_PASSWORD: str = ""           # Used by seed_admin.py on first deploy
 
     # Payment gateways
     PAYSTACK_SECRET_KEY: str = ""      # sk_live_xxx or sk_test_xxx
@@ -43,6 +47,10 @@ class Settings(BaseSettings):
     STRIPE_WEBHOOK_SECRET: str = ""
     FLUTTERWAVE_SECRET_KEY: str = ""   # FLWSECK_xxx
     FLUTTERWAVE_WEBHOOK_SECRET: str = ""
+
+    # Transactional email (Resend)
+    RESEND_API_KEY: str = ""
+    DEFAULT_FROM_EMAIL: str = "noreply@milevault.com"
 
     # Frontend
     FRONTEND_URL: str = "http://localhost:5173"
@@ -58,6 +66,18 @@ class Settings(BaseSettings):
 
     # Watermarking
     WATERMARK_TEXT: str = "MileVault"
+
+    @model_validator(mode="after")
+    def derive_celery_urls(self) -> "Settings":
+        # When deploying to Railway, only REDIS_URL is injected by the plugin.
+        # CELERY_BROKER_URL and CELERY_RESULT_BACKEND are derived here if blank.
+        if not self.CELERY_BROKER_URL:
+            base = self.REDIS_URL.rsplit("/", 1)[0] if self.REDIS_URL.count("/") > 2 else self.REDIS_URL
+            self.CELERY_BROKER_URL = f"{base}/1"
+        if not self.CELERY_RESULT_BACKEND:
+            base = self.REDIS_URL.rsplit("/", 1)[0] if self.REDIS_URL.count("/") > 2 else self.REDIS_URL
+            self.CELERY_RESULT_BACKEND = f"{base}/2"
+        return self
 
     @property
     def cors_origins_list(self) -> List[str]:

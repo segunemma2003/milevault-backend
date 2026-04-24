@@ -39,3 +39,6 @@ pyotp==2.9.0
 
 # Structured logging
 structlog==24.4.0
+
+# Transactional email
+resend==2.9.0

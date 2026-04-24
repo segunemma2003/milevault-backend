@@ -31,8 +31,11 @@ logger = logging.getLogger("milevault")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_tables()
-    logger.info("MileVault API started — tables verified.")
+    try:
+        create_tables()
+        logger.info("MileVault API started — tables verified.")
+    except Exception as exc:
+        logger.error(f"DB table creation failed (will retry on requests): {exc}")
 
     # Start Redis pub/sub listener for WebSocket fan-out
     try:

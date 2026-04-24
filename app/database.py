@@ -3,7 +3,12 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
-engine = create_engine(settings.DATABASE_URL)
+# Railway Postgres requires SSL; add sslmode=require if not already present
+_db_url = settings.DATABASE_URL
+if "railway" in _db_url and "sslmode" not in _db_url:
+    _db_url += "?sslmode=require"
+
+engine = create_engine(_db_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

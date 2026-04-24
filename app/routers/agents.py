@@ -8,7 +8,7 @@ Rules enforced here:
 """
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, status, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -17,7 +17,7 @@ from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.notification import Notification
 from app.dependencies import get_current_user, get_current_approved_agent
-from app.services.s3_service import get_presigned_upload_url
+from app.services.s3_service import get_presigned_upload_url, save_local_upload
 from app.services.cache_service import cache_set, cache_get
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
@@ -214,7 +214,7 @@ def register_as_agent(
         _notify(
             db, str(admin.id),
             "New Agent Application",
-            f"{f"{current_user.first_name} {current_user.last_name}".strip()} has applied to be a {specialty} agent. Review in the admin panel.",
+            f"{current_user.first_name} {current_user.last_name}".strip() + f" has applied to be a {specialty} agent. Review in the admin panel.",
         )
 
     db.commit()
@@ -340,7 +340,7 @@ def request_agent(
     _notify(
         db, str(current_user.id),
         "Agent Request Sent",
-        f"Your request to agent {f"{agent.user.first_name} {agent.user.last_name}".strip() if agent.user else "" if agent.user else ''} has been sent. Awaiting their response.",
+        ("Your request to agent " + (f"{agent.user.first_name} {agent.user.last_name}".strip() if agent.user else "") + " has been sent. Awaiting their response."),
     )
 
     db.commit()

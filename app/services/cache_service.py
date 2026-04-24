@@ -4,7 +4,7 @@ Gracefully degrades to a no-op in-memory dict when Redis is unavailable.
 """
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -108,5 +108,3 @@ def rate_limit_check(identifier: str, limit: int, window: int) -> Tuple[bool, in
         return True, limit   # Fail open
 
 
-# Import fix for Tuple
-from typing import Tuple  # noqa: E402 (placed after usage for readability)

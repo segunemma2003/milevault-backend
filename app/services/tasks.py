@@ -120,27 +120,20 @@ def watermark_video(self, s3_key: str, user_id: str) -> dict:
     name="app.services.tasks.send_notification_email",
 )
 def send_notification_email(self, to_email: str, subject: str, body_html: str) -> dict:
-    """Send transactional email via SES (or log in dev)."""
+    """Send transactional email via Resend (logs in dev when key not set)."""
     try:
-        if not settings.s3_enabled or settings.ENVIRONMENT != "production":
+        if not settings.RESEND_API_KEY:
             logger.info(f"[DEV EMAIL] To: {to_email} | Subject: {subject}")
             return {"status": "dev_logged"}
 
-        import boto3
-        ses = boto3.client(
-            "ses",
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION,
-        )
-        ses.send_email(
-            Source=f"MileVault <noreply@milevault.com>",
-            Destination={"ToAddresses": [to_email]},
-            Message={
-                "Subject": {"Data": subject},
-                "Body": {"Html": {"Data": body_html}},
-            },
-        )
+        import resend
+        resend.api_key = settings.RESEND_API_KEY
+        resend.Emails.send({
+            "from": f"MileVault <{settings.DEFAULT_FROM_EMAIL}>",
+            "to": [to_email],
+            "subject": subject,
+            "html": body_html,
+        })
         return {"status": "sent", "to": to_email}
     except Exception as exc:
         raise self.retry(exc=exc)

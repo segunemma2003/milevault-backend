@@ -11,8 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Railway injects $PORT at runtime; railway.toml startCommand uses it.
-# Local docker-compose uses 8000 via CMD below.
+# Verify all app imports resolve at build time so errors appear in build logs, not healthcheck.
+RUN python -c "from app.main import app; print('Import check passed')"
+
 EXPOSE 8000
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
