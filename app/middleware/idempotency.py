@@ -40,8 +40,12 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Scope idempotency key to the authenticated user to prevent cross-user replay
+        user_id = getattr(request.state, "user_id", None)
+        scoped_key = f"user:{user_id}:{key}" if user_id else f"anon:{key}"
+
         # Check cache
-        cached = idempotency_check(key)
+        cached = idempotency_check(scoped_key)
         if cached is not None:
             logger.info(f"Idempotency hit for key={key[:8]}***")
             return JSONResponse(
@@ -60,7 +64,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 body_bytes += chunk
             try:
                 body = json.loads(body_bytes)
-                idempotency_store(key, {"status_code": response.status_code, "body": body})
+                idempotency_store(scoped_key, {"status_code": response.status_code, "body": body})
             except Exception:
                 pass
 

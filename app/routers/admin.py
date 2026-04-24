@@ -55,6 +55,112 @@ def overview(db: Session = Depends(get_db), _: User = Depends(get_current_admin)
     }
 
 
+@router.get("/analytics", summary="Platform-wide time-series analytics")
+def admin_analytics(
+    days: int = Query(30, ge=7, le=90),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    """Return daily platform metrics for the last N days."""
+    from sqlalchemy import func as sqlfunc
+    now = datetime.utcnow()
+    start = now - timedelta(days=days)
+
+    date_range = [(start + timedelta(days=i)).date() for i in range(days + 1)]
+    scaffold = {d: 0.0 for d in date_range}
+
+    # Transaction volume (USD equivalent amounts) by day
+    tx_rows = (
+        db.query(
+            sqlfunc.date(Transaction.created_at).label("day"),
+            sqlfunc.coalesce(sqlfunc.sum(Transaction.amount), 0).label("total"),
+        )
+        .filter(Transaction.created_at >= start)
+        .group_by(sqlfunc.date(Transaction.created_at))
+        .all()
+    )
+    tx_by_day = {**scaffold}
+    for row in tx_rows:
+        tx_by_day[row.day] = float(row.total)
+
+    # Withdrawal volume by day
+    wd_rows = (
+        db.query(
+            sqlfunc.date(WalletTransaction.created_at).label("day"),
+            sqlfunc.coalesce(sqlfunc.sum(WalletTransaction.amount), 0).label("total"),
+        )
+        .filter(
+            WalletTransaction.type == "withdrawal",
+            WalletTransaction.created_at >= start,
+        )
+        .group_by(sqlfunc.date(WalletTransaction.created_at))
+        .all()
+    )
+    wd_by_day = {**scaffold}
+    for row in wd_rows:
+        wd_by_day[row.day] = float(row.total)
+
+    # Disputes opened per day
+    disp_rows = (
+        db.query(
+            sqlfunc.date(Dispute.created_at).label("day"),
+            sqlfunc.count(Dispute.id).label("cnt"),
+        )
+        .filter(Dispute.created_at >= start)
+        .group_by(sqlfunc.date(Dispute.created_at))
+        .all()
+    )
+    disp_scaffold = {d: 0 for d in date_range}
+    for row in disp_rows:
+        disp_scaffold[row.day] = int(row.cnt)
+
+    # KYC verifications by day
+    kyc_rows = (
+        db.query(
+            sqlfunc.date(User.created_at).label("day"),
+            sqlfunc.count(User.id).label("cnt"),
+        )
+        .filter(User.is_kyc_verified == True, User.created_at >= start)
+        .group_by(sqlfunc.date(User.created_at))
+        .all()
+    )
+    kyc_scaffold = {d: 0 for d in date_range}
+    for row in kyc_rows:
+        kyc_scaffold[row.day] = int(row.cnt)
+
+    # New user registrations by day
+    user_rows = (
+        db.query(
+            sqlfunc.date(User.created_at).label("day"),
+            sqlfunc.count(User.id).label("cnt"),
+        )
+        .filter(User.created_at >= start)
+        .group_by(sqlfunc.date(User.created_at))
+        .all()
+    )
+    user_scaffold = {d: 0 for d in date_range}
+    for row in user_rows:
+        user_scaffold[row.day] = int(row.cnt)
+
+    def _fmt(d):
+        return d.strftime("%b %-d")
+
+    series = [
+        {
+            "date": str(d),
+            "label": _fmt(d),
+            "transaction_volume": tx_by_day.get(d, 0.0),
+            "withdrawal_volume": wd_by_day.get(d, 0.0),
+            "disputes_opened": disp_scaffold.get(d, 0),
+            "kyc_verified": kyc_scaffold.get(d, 0),
+            "new_users": user_scaffold.get(d, 0),
+        }
+        for d in date_range
+    ]
+
+    return {"days": days, "series": series}
+
+
 # ══════════════════════════════════════════════════════════════════
 #  CURRENCY MANAGEMENT
 # ══════════════════════════════════════════════════════════════════
@@ -600,6 +706,117 @@ def deactivate_user(
     _notify(db, user_id, "Account Deactivated", f"Your account has been deactivated. Reason: {reason}. Contact support@milevault.com.")
     db.commit()
     return {"message": f"User '{user.email}' deactivated."}
+
+
+@router.put("/users/{user_id}/freeze-wallet", summary="Freeze a user's wallet (block all wallet operations)")
+def freeze_wallet(
+    user_id: str,
+    reason: str = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
+    user.wallet_frozen = True
+    _notify(db, user_id, "Wallet Frozen", f"Your wallet has been frozen by platform security. Reason: {reason}. Contact support@milevault.com.")
+    db.commit()
+    return {"message": f"Wallet frozen for {user.email}."}
+
+
+@router.put("/users/{user_id}/unfreeze-wallet", summary="Unfreeze a user's wallet")
+def unfreeze_wallet(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
+    user.wallet_frozen = False
+    _notify(db, user_id, "Wallet Unfrozen", "Your wallet has been unfrozen. You can now perform wallet operations.")
+    db.commit()
+    return {"message": f"Wallet unfrozen for {user.email}."}
+
+
+@router.put("/users/{user_id}/block-withdrawals", summary="Block withdrawals for a user")
+def block_withdrawals(
+    user_id: str,
+    reason: str = Body(...),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
+    user.withdrawals_blocked = True
+    _notify(db, user_id, "Withdrawals Blocked", f"Withdrawals on your account have been blocked. Reason: {reason}.")
+    db.commit()
+    return {"message": f"Withdrawals blocked for {user.email}."}
+
+
+@router.put("/users/{user_id}/unblock-withdrawals", summary="Unblock withdrawals for a user")
+def unblock_withdrawals(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
+    user.withdrawals_blocked = False
+    _notify(db, user_id, "Withdrawals Unblocked", "Your withdrawal access has been restored.")
+    db.commit()
+    return {"message": f"Withdrawals unblocked for {user.email}."}
+
+
+@router.post("/transfers/{wallet_txn_id}/reverse", summary="Reverse an internal wallet transfer")
+def reverse_transfer(
+    wallet_txn_id: str,
+    reason: str = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Admin reverses a transfer_out/transfer_in pair. Restores balances on both sides."""
+    out_txn = db.query(WalletTransaction).filter(
+        WalletTransaction.id == wallet_txn_id,
+        WalletTransaction.type == "transfer_out",
+        WalletTransaction.status == "completed",
+    ).first()
+    if not out_txn:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Completed transfer_out not found."})
+
+    # Find matching transfer_in by reference
+    in_txn = db.query(WalletTransaction).filter(
+        WalletTransaction.reference == out_txn.reference,
+        WalletTransaction.type == "transfer_in",
+        WalletTransaction.status == "completed",
+    ).first()
+
+    # Reverse sender (add back)
+    sender_bal = db.query(WalletBalance).filter(
+        WalletBalance.user_id == out_txn.user_id,
+        WalletBalance.currency == out_txn.currency,
+    ).first()
+    if sender_bal:
+        sender_bal.amount = round(sender_bal.amount + out_txn.amount, 8)
+
+    # Reverse recipient (deduct)
+    if in_txn:
+        recip_bal = db.query(WalletBalance).filter(
+            WalletBalance.user_id == in_txn.user_id,
+            WalletBalance.currency == in_txn.currency,
+        ).first()
+        if recip_bal:
+            recip_bal.amount = max(0, round(recip_bal.amount - in_txn.amount, 8))
+        in_txn.status = "reversed"
+        _notify(db, in_txn.user_id, "Transfer Reversed", f"A transfer of {in_txn.currency} {in_txn.amount:.2f} to your wallet has been reversed by admin. Reason: {reason}")
+
+    out_txn.status = "reversed"
+    _notify(db, out_txn.user_id, "Transfer Reversed", f"Your transfer of {out_txn.currency} {out_txn.amount:.2f} has been reversed. Funds returned. Reason: {reason}")
+
+    db.commit()
+    return {"message": "Transfer reversed successfully.", "amount": out_txn.amount}
 
 
 @router.put("/users/{user_id}/make-admin", summary="Grant admin rights to a user")

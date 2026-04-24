@@ -12,24 +12,33 @@ class Transaction(Base):
     title = Column(String(300), nullable=False)
     description = Column(Text, nullable=True)
     amount = Column(Float, nullable=False)
-    currency = Column(String(10), nullable=False, default="USD")
-    type = Column(String(20), nullable=False, default="one_time")  # one_time | milestone
-    status = Column(String(30), nullable=False, default="pending_approval")
-    # draft | pending_approval | approved | in_progress | completed | cancelled | disputed
+    currency = Column(String(10), nullable=False, default="NGN")
+    type = Column(String(20), nullable=False, default="milestone")  # one_time | milestone
+    status = Column(String(30), nullable=False, default="pending_acceptance")
+    # State machine:
+    # draft → pending_acceptance → funding_in_progress → partially_funded
+    # → active → in_progress → delivered → under_review → completed
+    # → disputed → refunded | cancelled
     buyer_id = Column(String, ForeignKey("users.id"), nullable=False)
     seller_id = Column(String, ForeignKey("users.id"), nullable=True)
     counterparty_email = Column(String(255), nullable=True)
     supporting_url = Column(String, nullable=True)
     contract_signed = Column(Boolean, default=False)
+    terms_accepted = Column(Boolean, default=False)
     expected_completion_date = Column(DateTime, nullable=True)
+    funding_deadline = Column(DateTime, nullable=True)   # auto-cancel if no milestone funded
     service_fee_payment = Column(String(10), default="buyer")  # buyer | seller | split
     buyer_fee_ratio = Column(Float, default=100.0)
     seller_fee_ratio = Column(Float, default=0.0)
     notes = Column(Text, nullable=True)
     project_url = Column(String, nullable=True)
     milestones_count = Column(Integer, default=0)
+    funded_milestones = Column(Integer, default=0)
     completed_milestones = Column(Integer, default=0)
-    terms_accepted = Column(Boolean, default=False)
+    # Exchange rate locked at creation
+    locked_exchange_rate = Column(Float, nullable=True)
+    locked_rate_from = Column(String(10), nullable=True)
+    locked_rate_to = Column(String(10), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -51,11 +60,21 @@ class Milestone(Base):
     description = Column(Text, nullable=True)
     amount = Column(Float, nullable=False)
     currency = Column(String(10), nullable=True)
-    status = Column(String(20), default="pending")  # pending | in_progress | completed | disputed
+    status = Column(String(20), default="pending")
+    # pending → funded → in_progress → delivered → under_review → completed
+    # disputed | revision_requested
+    funded_amount = Column(Float, default=0.0)    # how much has been escrowed for this milestone
+    is_funded = Column(Boolean, default=False)    # True when funded_amount >= amount
+    funding_deadline = Column(DateTime, nullable=True)
     due_date = Column(DateTime, nullable=True)
     completed_date = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    auto_release_at = Column(DateTime, nullable=True)  # auto-approve if buyer inactive
+    delivery_note = Column(Text, nullable=True)         # seller's delivery message
+    delivery_attachments = Column(JSON, default=list)   # files seller uploads on delivery
     expectations = Column(Text, nullable=True)
     feedback = Column(Text, nullable=True)
+    revision_note = Column(Text, nullable=True)
     percentage_of_total = Column(Float, nullable=True)
     attachments = Column(JSON, default=list)
     supporting_documents = Column(JSON, default=list)

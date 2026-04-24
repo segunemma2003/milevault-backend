@@ -117,6 +117,21 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
     access_token = create_access_token({"sub": user.id})
     refresh_token = create_refresh_token({"sub": user.id})
     _set_auth_cookies(response, access_token, refresh_token)
+
+    # Security alert: notify user of new login
+    try:
+        from app.services.notification_service import create_notification
+        ip = request.client.host if request.client else "unknown"
+        create_notification(
+            db, user.id,
+            "New Login Detected",
+            f"Your account was accessed from IP {ip}. If this wasn't you, change your password immediately.",
+            "security",
+        )
+        db.commit()
+    except Exception:
+        pass
+
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 

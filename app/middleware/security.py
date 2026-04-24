@@ -63,7 +63,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             if "/api/v1/" in path and not path.startswith("/api/v1/auth"):
                 csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
                 csrf_header = request.headers.get(CSRF_HEADER_NAME)
-                if csrf_cookie and csrf_header and csrf_cookie != csrf_header:
+                # If a CSRF cookie is present (browser/cookie-auth client), the header
+                # MUST be present and match. Bearer-only API clients have no CSRF cookie
+                # so they are exempt — intentional design for mobile/API callers.
+                if csrf_cookie and (not csrf_header or csrf_cookie != csrf_header):
                     return JSONResponse(
                         status_code=403,
                         content={

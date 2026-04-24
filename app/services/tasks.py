@@ -156,7 +156,116 @@ def process_kyc_document(self, kyc_doc_id: str) -> dict:
 @celery_app.task(
     bind=True,
     max_retries=3,
-    default_retry_delay=120,
+    default_retry_delay=300,
+    name="app.services.tasks.auto_release_milestone",
+)
+def auto_release_milestone(self, milestone_id: str) -> dict:
+    """
+    Auto-release escrow to seller if buyer hasn't approved within AUTO_RELEASE_DAYS.
+    Called after delivery is submitted. Skips if milestone already completed/disputed.
+    """
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        from datetime import datetime
+        from app.models.transaction import Milestone, Transaction
+        milestone = db.query(Milestone).filter(Milestone.id == milestone_id).first()
+        if not milestone:
+            return {"status": "not_found"}
+        if milestone.status in ("completed", "disputed", "revision_requested"):
+            return {"status": "skipped", "reason": milestone.status}
+        if milestone.status not in ("delivered", "funded", "in_progress"):
+            return {"status": "skipped", "reason": f"status={milestone.status}"}
+        # Check auto_release_at
+        if milestone.auto_release_at and datetime.utcnow() < milestone.auto_release_at:
+            return {"status": "not_yet_due"}
+
+        tx = db.query(Transaction).filter(Transaction.id == milestone.transaction_id).first()
+        if not tx:
+            return {"status": "tx_not_found"}
+
+        from app.routers.transactions import _release_milestone_escrow
+        _release_milestone_escrow(db, tx, milestone, feedback="Auto-released after buyer inactivity period.")
+        db.commit()
+        logger.info(f"Auto-released milestone {milestone_id}")
+        return {"status": "released", "milestone_id": milestone_id}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    name="app.services.tasks.cancel_unfunded_transaction",
+)
+def cancel_unfunded_transaction(self, transaction_id: str) -> dict:
+    """
+    Auto-cancel a transaction if no milestone is funded by the funding deadline.
+    Returns any partially-deposited escrow to buyer available balance.
+    """
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        from app.models.transaction import Transaction, Milestone
+        from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
+        from app.services.notification_service import create_notification
+
+        tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+        if not tx:
+            return {"status": "not_found"}
+        if tx.status in ("completed", "cancelled", "refunded"):
+            return {"status": "skipped"}
+        if (tx.funded_milestones or 0) > 0:
+            return {"status": "has_funded_milestones"}
+
+        # Refund any partial escrow (edge case: partial fund that never completed a milestone)
+        currency = tx.currency
+        buyer_balance = db.query(WalletBalance).filter(
+            WalletBalance.user_id == tx.buyer_id,
+            WalletBalance.currency == currency,
+        ).first()
+        if buyer_balance and (buyer_balance.escrow_amount or 0) > 0:
+            refund_amount = buyer_balance.escrow_amount
+            buyer_balance.amount += refund_amount
+            buyer_balance.escrow_amount = 0
+            db.add(LedgerEntry(
+                debit_user_id=None, credit_user_id=tx.buyer_id,
+                debit_account="escrow", credit_account="available",
+                amount=refund_amount, currency=currency,
+                reference_type="refund", reference_id=transaction_id,
+                description="Auto-refund: transaction cancelled due to funding deadline",
+            ))
+
+        tx.status = "cancelled"
+        create_notification(
+            db, tx.buyer_id,
+            "Transaction Auto-Cancelled",
+            f"'{tx.title}' was cancelled because no milestones were funded by the deadline. Any held funds have been returned.",
+            "transaction", related_item_id=tx.id, related_item_type="transaction",
+        )
+        if tx.seller_id:
+            create_notification(
+                db, tx.seller_id,
+                "Transaction Cancelled",
+                f"'{tx.title}' was cancelled because the buyer did not fund any milestones.",
+                "transaction", related_item_id=tx.id, related_item_type="transaction",
+            )
+        db.commit()
+        logger.info(f"Auto-cancelled unfunded transaction {transaction_id}")
+        return {"status": "cancelled", "transaction_id": transaction_id}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
     name="app.services.tasks.process_refund",
 )
 def process_refund(self, refund_id: str) -> dict:

@@ -22,6 +22,16 @@ class UserOut(BaseModel):
     bio: Optional[str] = None
     country_code: Optional[str] = None
     completion_percentage: int = 60
+    # Reputation
+    rating: float = 0.0
+    rating_count: float = 0.0
+    completion_rate: float = 0.0
+    dispute_rate: float = 0.0
+    total_volume: float = 0.0
+    badges: list = []
+    # Risk flags (visible to own user & admin)
+    wallet_frozen: bool = False
+    withdrawals_blocked: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

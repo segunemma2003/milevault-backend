@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Float, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -18,10 +18,28 @@ class User(Base):
     is_kyc_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     is_email_verified = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)
+    is_agent = Column(Boolean, default=False)
     phone = Column(String(50), nullable=True)
     location = Column(String(200), nullable=True)
     website = Column(String(300), nullable=True)
     bio = Column(Text, nullable=True)
+    country_code = Column(String(5), nullable=True)
+
+    # ── Reputation ────────────────────────────────────────────────────────────
+    rating = Column(Float, default=0.0)             # 0.0–5.0 average
+    rating_count = Column(Float, default=0.0)       # number of ratings received
+    completion_rate = Column(Float, default=0.0)    # % of transactions completed
+    dispute_rate = Column(Float, default=0.0)       # % of transactions disputed
+    total_volume = Column(Float, default=0.0)       # cumulative transaction value (NGN)
+    badges = Column(JSON, default=list)             # ["kyc_verified", "trusted_seller", ...]
+
+    # ── Risk & Fraud Controls ─────────────────────────────────────────────────
+    wallet_frozen = Column(Boolean, default=False)        # admin: freeze all wallet ops
+    withdrawals_blocked = Column(Boolean, default=False)  # admin: block withdrawals only
+    withdrawal_cooldown_until = Column(DateTime, nullable=True)  # can't withdraw until this time
+    risk_score = Column(Float, default=0.0)               # 0=low, 100=high risk
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -36,9 +54,6 @@ class User(Base):
     sent_messages = relationship("DirectMessage", foreign_keys="DirectMessage.sender_id", back_populates="sender")
     received_messages = relationship("DirectMessage", foreign_keys="DirectMessage.recipient_id", back_populates="recipient")
     agent_profile = relationship("Agent", foreign_keys="Agent.user_id", back_populates="user", uselist=False)
-    is_admin = Column(Boolean, default=False)
-    is_agent = Column(Boolean, default=False)   # Set to True when agent is approved
-    country_code = Column(String(5), nullable=True)  # ISO 3166 e.g. "NG", "US"
 
     @property
     def full_name(self):
@@ -48,7 +63,7 @@ class User(Base):
     def completion_percentage(self):
         fields = [self.phone, self.location, self.website, self.bio, self.avatar_url]
         filled = sum(1 for f in fields if f)
-        base = 60  # base for having email + name + role
+        base = 60
         return base + int((filled / len(fields)) * 40)
 
 
@@ -64,7 +79,7 @@ class UserSettings(Base):
     transaction_notifications = Column(Boolean, default=True)
     marketing_notifications = Column(Boolean, default=False)
     security_notifications = Column(Boolean, default=True)
-    default_currency = Column(String(10), default="USD")
+    default_currency = Column(String(10), default="NGN")
     two_factor_enabled = Column(Boolean, default=False)
     two_factor_secret = Column(String, nullable=True)
 

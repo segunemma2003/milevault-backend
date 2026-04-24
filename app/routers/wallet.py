@@ -306,8 +306,15 @@ def verify_deposit_endpoint(
         )
 
     # Credit wallet
+    if current_user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
+    from datetime import datetime, timedelta
     balance = get_or_create_balance(db, current_user.id, result["currency"])
     balance.amount += result["amount"]
+    # Set 24h withdrawal cooldown on new deposit (fraud prevention)
+    cooldown = datetime.utcnow() + timedelta(hours=24)
+    if not current_user.withdrawal_cooldown_until or current_user.withdrawal_cooldown_until < cooldown:
+        current_user.withdrawal_cooldown_until = cooldown
 
     # Update pending transaction or create a new completed one
     if wallet_transaction_id:
@@ -359,6 +366,18 @@ def withdraw(
     Request a withdrawal. Funds are moved to pending_amount immediately.
     Admin reviews and processes via the payment gateway.
     """
+    # Risk & fraud controls
+    if current_user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support@milevault.com."})
+    if current_user.withdrawals_blocked:
+        raise HTTPException(status_code=403, detail={"error": "WITHDRAWALS_BLOCKED", "message": "Withdrawals are currently blocked on your account. Contact support@milevault.com."})
+    if not current_user.is_kyc_verified:
+        raise HTTPException(status_code=403, detail={"error": "KYC_REQUIRED", "message": "Identity verification (KYC) is required before withdrawing funds."})
+    from datetime import datetime
+    if current_user.withdrawal_cooldown_until and datetime.utcnow() < current_user.withdrawal_cooldown_until:
+        wait_until = current_user.withdrawal_cooldown_until.strftime("%Y-%m-%d %H:%M UTC")
+        raise HTTPException(status_code=429, detail={"error": "COOLDOWN_ACTIVE", "message": f"Withdrawal cooldown active. You can withdraw after {wait_until}."})
+
     if payload.amount <= 0:
         raise HTTPException(
             status_code=422,
@@ -589,6 +608,19 @@ def list_currencies(db: Session = Depends(get_db)):
         }
         for c in currencies
     ]
+
+
+@router.get("/platform-info")
+def platform_info(db: Session = Depends(get_db)):
+    """Public endpoint returning platform fee and currency info for the fee calculator."""
+    from app.models.currency import PlatformSettings
+    settings = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
+    return {
+        "escrow_fee_percent": settings.escrow_fee_percent if settings else 2.5,
+        "min_fee_amount": settings.min_fee_amount if settings else 0,
+        "max_fee_amount": settings.max_fee_amount if settings else None,
+        "fee_currency": settings.fee_currency if settings else "USD",
+    }
 
 
 @router.get("/gateway")

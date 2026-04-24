@@ -11,12 +11,17 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 LIMITS: dict = {
-    "/api/v1/auth/login": (10, 60),       # 10 req/min
-    "/api/v1/auth/register": (5, 60),     # 5 reg/min
+    "/api/v1/auth/login": (10, 60),            # 10 req/min
+    "/api/v1/auth/register": (5, 60),          # 5 reg/min
     "/api/v1/auth/refresh": (20, 60),
     "/api/v1/uploads": (20, 60),
     "/api/v1/kyc": (10, 60),
-    "default": (120, 60),                  # 120 req/min for everything else
+    "/api/v1/wallet/deposit": (10, 3600),      # 10 deposit initiations/hour
+    "/api/v1/wallet/withdraw": (5, 3600),      # 5 withdrawal requests/hour
+    "/api/v1/disputes": (3, 86400),            # 3 disputes/day
+    "/api/v1/wallet/verify": (20, 60),         # 20 payment verifications/min
+    "/api/v1/agents/register": (3, 86400),     # 3 agent registration attempts/day
+    "default": (120, 60),                      # 120 req/min for everything else
 }
 
 
