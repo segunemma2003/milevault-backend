@@ -5,8 +5,11 @@ from app.config import settings
 
 # Railway Postgres requires SSL; add sslmode=require if not already present
 _db_url = settings.DATABASE_URL
-if "railway" in _db_url and "sslmode" not in _db_url:
-    _db_url += "?sslmode=require"
+# Only add SSL for external/proxy hosts — internal Railway network doesn't need it
+_needs_ssl = any(h in _db_url for h in ("rlwy.net", "render.com", "neon.tech", "supabase")) and \
+             "railway.internal" not in _db_url
+if _needs_ssl and "sslmode" not in _db_url:
+    _db_url += ("&" if "?" in _db_url else "?") + "sslmode=require"
 
 engine = create_engine(_db_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -23,4 +26,5 @@ def get_db():
 
 def create_tables():
     from app.models import user, transaction, wallet, dispute, message, kyc, notification  # noqa
+    from app.models import agent, currency  # noqa
     Base.metadata.create_all(bind=engine)

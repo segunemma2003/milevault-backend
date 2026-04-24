@@ -35,7 +35,8 @@ async def lifespan(app: FastAPI):
         create_tables()
         logger.info("MileVault API started — tables verified.")
     except Exception as exc:
-        logger.error(f"DB table creation failed (will retry on requests): {exc}")
+        import traceback
+        logger.error(f"DB table creation failed (degraded mode): {exc}\n{traceback.format_exc()}")
 
     # Start Redis pub/sub listener for WebSocket fan-out
     try:

@@ -11,7 +11,10 @@ from app.database import get_db
 from app.dependencies import get_current_admin
 from app.models.user import User
 from app.models.currency import Currency, ExchangeRate, PaymentGateway, Refund, CurrencyType, PaymentGatewayName, PlatformSettings
-from app.models.agent import Agent, AgentStatus
+from app.models.agent import (
+    Agent, AgentStatus, AgentRequest, AgentRequestStatus,
+    AgentSubscriptionPlan, AgentSubscription, AgentServiceTier, AgentEarning,
+)
 from app.models.transaction import Transaction, Milestone
 from app.models.dispute import Dispute, DisputeDocument
 from app.models.message import ChatMessage
@@ -1134,3 +1137,404 @@ def reject_withdrawal(
     )
     db.commit()
     return {"message": "Withdrawal rejected. Funds returned to user balance.", "id": txn_id}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AGENT SUBSCRIPTION PLANS  (admin manages available plans)
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/agent-plans", summary="List all agent subscription plans")
+def list_agent_plans(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+    plans = db.query(AgentSubscriptionPlan).order_by(AgentSubscriptionPlan.price).all()
+    return [
+        {
+            "id": str(p.id),
+            "name": p.name,
+            "display_name": p.display_name,
+            "price": p.price,
+            "currency": p.currency,
+            "duration_months": p.duration_months,
+            "priority_boost": p.priority_boost,
+            "features": p.features or [],
+            "is_active": p.is_active,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in plans
+    ]
+
+
+@router.post("/agent-plans", status_code=201, summary="Create an agent subscription plan")
+def create_agent_plan(
+    name: str = Body(...),
+    display_name: str = Body(...),
+    price: float = Body(...),
+    currency: str = Body("USD"),
+    duration_months: int = Body(1),
+    priority_boost: int = Body(0),
+    features: list = Body(default=[]),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    if db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.name == name).first():
+        raise HTTPException(status_code=409, detail={"error": "PLAN_EXISTS", "message": f"Plan '{name}' already exists."})
+    plan = AgentSubscriptionPlan(
+        name=name.lower().strip(),
+        display_name=display_name.strip(),
+        price=price,
+        currency=currency.upper(),
+        duration_months=duration_months,
+        priority_boost=priority_boost,
+        features=features,
+        is_active=True,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return {"message": f"Plan '{display_name}' created.", "id": str(plan.id)}
+
+
+@router.put("/agent-plans/{plan_id}", summary="Update an agent subscription plan")
+def update_agent_plan(
+    plan_id: str,
+    display_name: Optional[str] = Body(None),
+    price: Optional[float] = Body(None),
+    priority_boost: Optional[int] = Body(None),
+    features: Optional[list] = Body(None),
+    is_active: Optional[bool] = Body(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    plan = db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Plan not found."})
+    if display_name is not None:
+        plan.display_name = display_name.strip()
+    if price is not None:
+        plan.price = price
+    if priority_boost is not None:
+        plan.priority_boost = priority_boost
+    if features is not None:
+        plan.features = features
+    if is_active is not None:
+        plan.is_active = is_active
+    db.commit()
+    return {"message": "Plan updated."}
+
+
+@router.delete("/agent-plans/{plan_id}", summary="Deactivate an agent subscription plan")
+def delete_agent_plan(
+    plan_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    plan = db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Plan not found."})
+    plan.is_active = False
+    db.commit()
+    return {"message": "Plan deactivated."}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AGENT SERVICE TIERS  (fee by transaction value range)
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/agent-service-tiers", summary="List agent service fee tiers")
+def list_agent_service_tiers(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+    tiers = db.query(AgentServiceTier).order_by(AgentServiceTier.min_transaction_amount).all()
+    return [
+        {
+            "id": str(t.id),
+            "name": t.name,
+            "min_transaction_amount": t.min_transaction_amount,
+            "max_transaction_amount": t.max_transaction_amount,
+            "fee_type": t.fee_type,
+            "fee_amount": t.fee_amount,
+            "agent_payout_percent": t.agent_payout_percent,
+            "currency": t.currency,
+            "description": t.description,
+            "is_active": t.is_active,
+        }
+        for t in tiers
+    ]
+
+
+@router.post("/agent-service-tiers", status_code=201, summary="Create an agent service fee tier")
+def create_agent_service_tier(
+    name: str = Body(...),
+    min_transaction_amount: float = Body(...),
+    max_transaction_amount: Optional[float] = Body(None),
+    fee_type: str = Body("flat"),
+    fee_amount: float = Body(...),
+    agent_payout_percent: float = Body(70.0),
+    currency: str = Body("USD"),
+    description: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    if fee_type not in ("flat", "percent"):
+        raise HTTPException(status_code=422, detail={"error": "INVALID_FEE_TYPE", "message": "fee_type must be 'flat' or 'percent'."})
+    if not (0 < agent_payout_percent <= 100):
+        raise HTTPException(status_code=422, detail={"error": "INVALID_PAYOUT", "message": "agent_payout_percent must be between 1 and 100."})
+    tier = AgentServiceTier(
+        name=name.strip(),
+        min_transaction_amount=min_transaction_amount,
+        max_transaction_amount=max_transaction_amount,
+        fee_type=fee_type,
+        fee_amount=fee_amount,
+        agent_payout_percent=agent_payout_percent,
+        currency=currency.upper(),
+        description=description,
+        is_active=True,
+    )
+    db.add(tier)
+    db.commit()
+    db.refresh(tier)
+    return {"message": f"Service tier '{name}' created.", "id": str(tier.id)}
+
+
+@router.put("/agent-service-tiers/{tier_id}", summary="Update an agent service fee tier")
+def update_agent_service_tier(
+    tier_id: str,
+    name: Optional[str] = Body(None),
+    min_transaction_amount: Optional[float] = Body(None),
+    max_transaction_amount: Optional[float] = Body(None),
+    fee_type: Optional[str] = Body(None),
+    fee_amount: Optional[float] = Body(None),
+    agent_payout_percent: Optional[float] = Body(None),
+    is_active: Optional[bool] = Body(None),
+    description: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    tier = db.query(AgentServiceTier).filter(AgentServiceTier.id == tier_id).first()
+    if not tier:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Service tier not found."})
+    for field, val in {
+        "name": name, "min_transaction_amount": min_transaction_amount,
+        "max_transaction_amount": max_transaction_amount, "fee_type": fee_type,
+        "fee_amount": fee_amount, "agent_payout_percent": agent_payout_percent,
+        "is_active": is_active, "description": description,
+    }.items():
+        if val is not None:
+            setattr(tier, field, val)
+    db.commit()
+    return {"message": "Service tier updated."}
+
+
+@router.delete("/agent-service-tiers/{tier_id}", summary="Deactivate an agent service fee tier")
+def delete_agent_service_tier(
+    tier_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    tier = db.query(AgentServiceTier).filter(AgentServiceTier.id == tier_id).first()
+    if not tier:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Service tier not found."})
+    tier.is_active = False
+    db.commit()
+    return {"message": "Service tier deactivated."}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AGENT REQUEST MANAGEMENT  (admin assigns agents, views all)
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/agent-requests", summary="List all agent requests platform-wide")
+def list_all_agent_requests(
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    q = db.query(AgentRequest)
+    if status_filter:
+        q = q.filter(AgentRequest.status == status_filter)
+    reqs = q.order_by(AgentRequest.created_at.desc()).limit(200).all()
+    result = []
+    for r in reqs:
+        tx = db.query(Transaction).filter(Transaction.id == str(r.transaction_id)).first()
+        buyer = db.query(User).filter(User.id == str(r.buyer_id)).first()
+        result.append({
+            "id": str(r.id),
+            "transaction_id": str(r.transaction_id),
+            "transaction_title": tx.title if tx else None,
+            "transaction_amount": tx.amount if tx else None,
+            "buyer_name": f"{buyer.first_name} {buyer.last_name}".strip() if buyer else None,
+            "buyer_email": buyer.email if buyer else None,
+            "agent_id": str(r.agent_id) if r.agent_id else None,
+            "agent_name": (
+                f"{r.agent.user.first_name} {r.agent.user.last_name}".strip()
+                if r.agent and r.agent.user else None
+            ),
+            "status": r.status,
+            "fee_charged": r.fee_charged,
+            "fee_currency": r.fee_currency,
+            "agent_payout_amount": r.agent_payout_amount,
+            "payout_status": r.payout_status,
+            "assigned_by_admin": r.assigned_by_admin,
+            "buyer_message": r.buyer_message,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        })
+    return {"requests": result, "total": len(result)}
+
+
+@router.post("/agent-requests/{request_id}/assign", summary="Admin assigns an agent to a request")
+def admin_assign_agent(
+    request_id: str,
+    agent_id: str = Body(...),
+    notes: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """
+    Admin can assign (or reassign) any approved agent to a buyer's agent request.
+    This overrides the buyer's original agent choice or fills an unassigned request.
+    """
+    req = db.query(AgentRequest).filter(AgentRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Agent request not found."})
+    if req.status == AgentRequestStatus.completed:
+        raise HTTPException(status_code=409, detail={"error": "ALREADY_COMPLETED", "message": "Cannot reassign a completed request."})
+
+    new_agent = db.query(Agent).filter(
+        Agent.id == agent_id,
+        Agent.status == AgentStatus.approved,
+    ).first()
+    if not new_agent:
+        raise HTTPException(status_code=404, detail={"error": "AGENT_NOT_FOUND", "message": "Approved agent not found."})
+
+    req.agent_id = new_agent.id
+    req.assigned_by_admin = True
+    req.assigned_by = str(admin.id)
+    req.status = AgentRequestStatus.active
+
+    # Recalculate fee if not already set
+    if not req.fee_charged:
+        tx = db.query(Transaction).filter(Transaction.id == str(req.transaction_id)).first()
+        if tx:
+            from app.models.agent import AgentServiceTier
+            tiers = db.query(AgentServiceTier).filter(AgentServiceTier.is_active == True).all()
+            for tier in tiers:
+                if tier.min_transaction_amount <= tx.amount:
+                    if tier.max_transaction_amount is None or tx.amount <= tier.max_transaction_amount:
+                        if tier.fee_type == "flat":
+                            req.fee_charged = tier.fee_amount
+                        else:
+                            req.fee_charged = round(tx.amount * tier.fee_amount / 100, 2)
+                        req.fee_currency = tier.currency
+                        req.agent_payout_amount = round(req.fee_charged * tier.agent_payout_percent / 100, 2)
+                        break
+
+    # Create earnings record
+    if req.fee_charged and req.agent_payout_amount:
+        existing_earning = db.query(AgentEarning).filter(AgentEarning.request_id == req.id).first()
+        if not existing_earning:
+            db.add(AgentEarning(
+                agent_id=new_agent.id,
+                request_id=req.id,
+                gross_fee=req.fee_charged,
+                agent_payout=req.agent_payout_amount,
+                platform_cut=req.fee_charged - req.agent_payout_amount,
+                currency=req.fee_currency or "USD",
+                status="pending",
+            ))
+
+    _notify(db, str(new_agent.user_id), "You've Been Assigned to a Project",
+            f"An admin has assigned you to a verification request. Check your agent dashboard.")
+    _notify(db, str(req.buyer_id), "Agent Assigned to Your Request",
+            f"An admin has assigned a verified agent to your request." + (f" Notes: {notes}" if notes else ""))
+    db.commit()
+    return {"message": f"Agent assigned and request is now active.", "request_id": request_id}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AGENT EARNINGS & PAYOUTS
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/agent-earnings", summary="List all agent earnings/payout records")
+def list_agent_earnings(
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    q = db.query(AgentEarning)
+    if status_filter:
+        q = q.filter(AgentEarning.status == status_filter)
+    earnings = q.order_by(AgentEarning.created_at.desc()).limit(200).all()
+    result = []
+    for e in earnings:
+        agent_user = e.agent.user if e.agent else None
+        result.append({
+            "id": str(e.id),
+            "agent_id": str(e.agent_id),
+            "agent_name": f"{agent_user.first_name} {agent_user.last_name}".strip() if agent_user else None,
+            "agent_email": agent_user.email if agent_user else None,
+            "request_id": str(e.request_id) if e.request_id else None,
+            "gross_fee": e.gross_fee,
+            "agent_payout": e.agent_payout,
+            "platform_cut": e.platform_cut,
+            "currency": e.currency,
+            "status": e.status,
+            "paid_at": e.paid_at.isoformat() if e.paid_at else None,
+            "notes": e.notes,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        })
+    return {"earnings": result, "total": len(result)}
+
+
+@router.post("/agent-earnings/{earning_id}/payout", summary="Admin marks an agent earning as paid")
+def process_agent_payout(
+    earning_id: str,
+    notes: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    earning = db.query(AgentEarning).filter(AgentEarning.id == earning_id).first()
+    if not earning:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Earning record not found."})
+    if earning.status == "paid":
+        raise HTTPException(status_code=409, detail={"error": "ALREADY_PAID", "message": "This earning has already been paid out."})
+
+    earning.status = "paid"
+    earning.paid_at = datetime.utcnow()
+    earning.notes = notes
+
+    # Update agent's total earnings
+    if earning.agent:
+        earning.agent.total_earnings = (earning.agent.total_earnings or 0) + earning.agent_payout
+
+    agent_user = earning.agent.user if earning.agent else None
+    if agent_user:
+        _notify(db, str(agent_user.id), "Payout Processed",
+                f"Your payout of {earning.currency} {earning.agent_payout:.2f} has been processed." +
+                (f" Notes: {notes}" if notes else ""))
+    db.commit()
+    return {"message": f"Payout of {earning.currency} {earning.agent_payout:.2f} marked as paid.", "earning_id": earning_id}
+
+
+@router.get("/agent-subscriptions", summary="List all active agent subscriptions")
+def list_agent_subscriptions(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    subs = db.query(AgentSubscription).filter(
+        AgentSubscription.is_active == True
+    ).order_by(AgentSubscription.expires_at.desc()).all()
+    return [
+        {
+            "id": str(s.id),
+            "agent_id": str(s.agent_id),
+            "agent_name": (
+                f"{s.agent.user.first_name} {s.agent.user.last_name}".strip()
+                if s.agent and s.agent.user else None
+            ),
+            "plan_name": s.plan.display_name if s.plan else None,
+            "plan_price": s.plan.price if s.plan else None,
+            "currency": s.plan.currency if s.plan else None,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "expires_at": s.expires_at.isoformat() if s.expires_at else None,
+            "payment_reference": s.payment_reference,
+        }
+        for s in subs
+    ]
