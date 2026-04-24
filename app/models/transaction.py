@@ -61,8 +61,8 @@ class Milestone(Base):
     amount = Column(Float, nullable=False)
     currency = Column(String(10), nullable=True)
     status = Column(String(20), default="pending")
-    # pending → funded → in_progress → delivered → under_review → completed
-    # disputed | revision_requested
+    # pending → partially_funded → funded → in_progress → under_review → completed
+    # delivered (legacy) | revision_requested | disputed
     funded_amount = Column(Float, default=0.0)    # how much has been escrowed for this milestone
     is_funded = Column(Boolean, default=False)    # True when funded_amount >= amount
     funding_deadline = Column(DateTime, nullable=True)
@@ -70,8 +70,14 @@ class Milestone(Base):
     completed_date = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     auto_release_at = Column(DateTime, nullable=True)  # auto-approve if buyer inactive
-    delivery_note = Column(Text, nullable=True)         # seller's delivery message
-    delivery_attachments = Column(JSON, default=list)   # files seller uploads on delivery
+    delivery_title = Column(String(300), nullable=True)
+    delivery_note = Column(Text, nullable=True)         # seller's delivery description (required with proof)
+    delivery_attachments = Column(JSON, default=list)   # file keys / URLs from upload flow
+    delivery_external_links = Column(JSON, default=list)  # e.g. GitHub, Drive
+    delivery_version_notes = Column(Text, nullable=True)
+    invalid_delivery_reported = Column(Boolean, default=False)
+    invalid_delivery_report_note = Column(Text, nullable=True)
+    milestone_action_logs = Column(JSON, default=list)   # append-only audit: {at, user_id, action, detail}
     expectations = Column(Text, nullable=True)
     feedback = Column(Text, nullable=True)
     revision_note = Column(Text, nullable=True)

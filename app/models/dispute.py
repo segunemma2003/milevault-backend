@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -10,7 +10,9 @@ class Dispute(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     transaction_id = Column(String, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False)
+    milestone_id = Column(String, ForeignKey("milestones.id", ondelete="SET NULL"), nullable=True)
     raised_by = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    evidence_urls = Column(JSON, default=list)  # submitted at creation (S3 keys or https URLs)
     title = Column(String(300), nullable=False)
     description = Column(Text, nullable=False)
     reason = Column(String(50), nullable=False)

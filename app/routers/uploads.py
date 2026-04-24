@@ -33,6 +33,7 @@ FOLDER_MAP = {
     "avatar": "avatars",
     "kyc": "kyc_documents",
     "dispute": "dispute_evidence",
+    "delivery": "milestone_delivery",
     "transaction": "transaction_docs",
     "agent_evidence": "agent_evidence",
     "general": "general",

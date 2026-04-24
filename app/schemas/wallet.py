@@ -38,6 +38,7 @@ class WithdrawRequest(BaseModel):
     currency: str = "USD"
     method: str = "bank"
     bank_details: str = ""
+    otp_code: Optional[str] = None  # required when 2FA is enabled on the account
 
 
 class ConvertRequest(BaseModel):

@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # Watermarking
     WATERMARK_TEXT: str = "MileVault"
 
+    # Milestones / funding deadline (days after seller accepts before auto-cancel rules apply)
+    FUNDING_DEADLINE_DAYS: int = 14
+    # Buyer review window after delivery (must be 3–7 inclusive per policy)
+    AUTO_RELEASE_DAYS: int = 5
+
     @model_validator(mode="after")
     def derive_celery_urls(self) -> "Settings":
         # When deploying to Railway, only REDIS_URL is injected by the plugin.
@@ -89,6 +94,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
+
+    @property
+    def auto_release_days_clamped(self) -> int:
+        return max(3, min(7, int(self.AUTO_RELEASE_DAYS)))
 
     @property
     def s3_enabled(self) -> bool:

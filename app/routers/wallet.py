@@ -109,6 +109,7 @@ def get_balances(
             "id": str(b.id),
             "currency": b.currency,
             "amount": b.amount,
+            "escrow_amount": b.escrow_amount or 0,
             "pending_amount": b.pending_amount,
             "symbol": CURRENCY_SYMBOLS.get(b.currency, b.currency),
         }
@@ -378,6 +379,30 @@ def withdraw(
         wait_until = current_user.withdrawal_cooldown_until.strftime("%Y-%m-%d %H:%M UTC")
         raise HTTPException(status_code=429, detail={"error": "COOLDOWN_ACTIVE", "message": f"Withdrawal cooldown active. You can withdraw after {wait_until}."})
 
+    from app.models.user import UserSettings
+    import pyotp
+
+    us = db.query(UserSettings).filter(UserSettings.user_id == current_user.id).first()
+    if us and us.two_factor_enabled:
+        if not payload.otp_code or not str(payload.otp_code).strip():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "TWO_FACTOR_REQUIRED",
+                    "message": "Enter the 6-digit code from your authenticator app to request a withdrawal.",
+                },
+            )
+        if not us.two_factor_secret:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "TWO_FACTOR_MISCONFIGURED", "message": "Two-factor authentication is enabled but not set up correctly. Contact support."},
+            )
+        if not pyotp.TOTP(us.two_factor_secret).verify(str(payload.otp_code).strip(), valid_window=1):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "INVALID_OTP", "message": "Invalid or expired authentication code."},
+            )
+
     if payload.amount <= 0:
         raise HTTPException(
             status_code=422,
@@ -401,6 +426,9 @@ def withdraw(
 
     balance.amount -= payload.amount
     balance.pending_amount = (balance.pending_amount or 0) + payload.amount
+
+    if payload.amount >= 5000:
+        current_user.risk_score = min(100.0, float(current_user.risk_score or 0) + 1.0)
 
     bank_note = f" | {payload.bank_details}" if payload.bank_details else ""
     txn = WalletTransaction(
@@ -620,6 +648,7 @@ def platform_info(db: Session = Depends(get_db)):
         "min_fee_amount": settings.min_fee_amount if settings else 0,
         "max_fee_amount": settings.max_fee_amount if settings else None,
         "fee_currency": settings.fee_currency if settings else "USD",
+        "high_value_checklist_threshold": getattr(settings, "high_value_checklist_threshold", None) if settings else None,
     }
 
 

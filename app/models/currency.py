@@ -135,5 +135,13 @@ class PlatformSettings(Base):
     platform_name = Column(String(100), default="MileVault")
     support_email = Column(String(255), default="support@milevault.com")
 
+    # When milestone amount >= this (same currency as milestone or tx), buyer must confirm checklist on approve
+    high_value_checklist_threshold = Column(Float, nullable=True)
+
+    # Days after seller accepts until funding deadline job runs (1–366)
+    funding_deadline_days = Column(Integer, default=14, nullable=False)
+    # Buyer inactivity window after delivery before auto-release (3–7)
+    auto_release_days = Column(Integer, default=5, nullable=False)
+
     updated_by = Column(String, ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

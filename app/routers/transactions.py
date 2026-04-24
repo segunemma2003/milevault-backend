@@ -1,18 +1,81 @@
+import hashlib
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import Optional, Any, Dict
 from app.database import get_db
-from app.schemas.transaction import TransactionCreate, TransactionUpdate, TransactionOut, MilestoneCreate, MilestoneUpdate, MilestoneOut
+from app.schemas.transaction import (
+    TransactionCreate,
+    TransactionUpdate,
+    TransactionOut,
+    MilestoneCreate,
+    MilestoneUpdate,
+    MilestoneOut,
+    FundMilestoneBody,
+    DeliverySubmit,
+    ApproveMilestoneBody,
+    InvalidDeliveryReport,
+)
 from app.models.transaction import Transaction, Milestone
 from app.models.user import User
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
-
-AUTO_RELEASE_DAYS = 5  # buyer inactivity window
+from app.config import settings
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+def _auto_release_days_for_milestone(milestone_id: str) -> int:
+    """Deterministic 3–7 day buyer review window per milestone."""
+    n = int(hashlib.sha256(milestone_id.encode()).hexdigest()[:8], 16)
+    return 3 + (n % 5)
+
+
+def milestone_to_public_dict(m: Milestone) -> Dict[str, Any]:
+    return {
+        "id": m.id,
+        "transaction_id": m.transaction_id,
+        "title": m.title,
+        "description": m.description,
+        "amount": m.amount,
+        "currency": m.currency,
+        "status": m.status,
+        "due_date": m.due_date,
+        "completed_date": m.completed_date,
+        "delivered_at": m.delivered_at,
+        "auto_release_at": m.auto_release_at,
+        "funded_amount": m.funded_amount or 0,
+        "is_funded": bool(m.is_funded),
+        "expectations": m.expectations,
+        "feedback": m.feedback,
+        "revision_note": m.revision_note,
+        "delivery_title": getattr(m, "delivery_title", None),
+        "delivery_note": m.delivery_note,
+        "delivery_attachments": m.delivery_attachments or [],
+        "delivery_external_links": getattr(m, "delivery_external_links", None) or [],
+        "delivery_version_notes": getattr(m, "delivery_version_notes", None),
+        "invalid_delivery_reported": bool(getattr(m, "invalid_delivery_reported", False)),
+        "invalid_delivery_report_note": getattr(m, "invalid_delivery_report_note", None),
+        "milestone_action_logs": getattr(m, "milestone_action_logs", None) or [],
+        "percentage_of_total": m.percentage_of_total,
+        "attachments": m.attachments or [],
+        "supporting_documents": m.supporting_documents or [],
+        "created_at": m.created_at,
+    }
+
+
+def _append_milestone_log(milestone: Milestone, user_id: str, action: str, detail: Optional[dict] = None) -> None:
+    logs = list(milestone.milestone_action_logs or [])
+    logs.append(
+        {
+            "at": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "action": action,
+            "detail": detail or {},
+        }
+    )
+    milestone.milestone_action_logs = logs
 
 
 def transaction_to_dict(tx: Transaction) -> dict:
@@ -52,37 +115,23 @@ def transaction_to_dict(tx: Transaction) -> dict:
         } if seller else None,
         "supporting_url": tx.supporting_url,
         "contract_signed": tx.contract_signed,
+        "funding_deadline": tx.funding_deadline.isoformat() if tx.funding_deadline else None,
+        "locked_exchange_rate": tx.locked_exchange_rate,
+        "locked_rate_from": tx.locked_rate_from,
+        "locked_rate_to": tx.locked_rate_to,
         "created_at": tx.created_at,
         "updated_at": tx.updated_at,
         "additional_details": {
             "project_url": tx.project_url,
             "expected_delivery_date": tx.expected_completion_date.isoformat() if tx.expected_completion_date else None,
             "milestones_count": tx.milestones_count,
+            "funded_milestones": tx.funded_milestones,
             "completed_milestones": tx.completed_milestones,
             "notes": tx.notes,
             "service_fee_payment": tx.service_fee_payment,
             "service_fee_ratio": {"buyer": tx.buyer_fee_ratio, "seller": tx.seller_fee_ratio},
         },
-        "milestones": [
-            {
-                "id": m.id,
-                "transaction_id": m.transaction_id,
-                "title": m.title,
-                "description": m.description,
-                "amount": m.amount,
-                "currency": m.currency,
-                "status": m.status,
-                "due_date": m.due_date,
-                "completed_date": m.completed_date,
-                "expectations": m.expectations,
-                "feedback": m.feedback,
-                "percentage_of_total": m.percentage_of_total,
-                "attachments": m.attachments or [],
-                "supporting_documents": m.supporting_documents or [],
-                "created_at": m.created_at,
-            }
-            for m in tx.milestones
-        ],
+        "milestones": [milestone_to_public_dict(m) for m in tx.milestones],
     }
 
 
@@ -117,6 +166,23 @@ def create_transaction(
     )
     db.add(tx)
     db.flush()
+
+    try:
+        from app.routers.wallet import _get_exchange_rate
+
+        cur = (payload.currency or "USD").upper()
+        if cur == "USD":
+            tx.locked_exchange_rate = 1.0
+            tx.locked_rate_from = "USD"
+            tx.locked_rate_to = "USD"
+        else:
+            tx.locked_exchange_rate = _get_exchange_rate(db, cur, "USD")
+            tx.locked_rate_from = cur
+            tx.locked_rate_to = "USD"
+    except HTTPException:
+        tx.locked_exchange_rate = None
+        tx.locked_rate_from = None
+        tx.locked_rate_to = None
 
     for m in (payload.milestones or []):
         milestone = Milestone(
@@ -243,26 +309,7 @@ def get_milestones(
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    return [
-        {
-            "id": m.id,
-            "transaction_id": m.transaction_id,
-            "title": m.title,
-            "description": m.description,
-            "amount": m.amount,
-            "currency": m.currency,
-            "status": m.status,
-            "due_date": m.due_date,
-            "completed_date": m.completed_date,
-            "expectations": m.expectations,
-            "feedback": m.feedback,
-            "percentage_of_total": m.percentage_of_total,
-            "attachments": m.attachments or [],
-            "supporting_documents": m.supporting_documents or [],
-            "created_at": m.created_at,
-        }
-        for m in tx.milestones
-    ]
+    return [milestone_to_public_dict(m) for m in tx.milestones]
 
 
 @router.post("/{transaction_id}/milestones", status_code=status.HTTP_201_CREATED)
@@ -349,6 +396,7 @@ def accept_transaction(
         raise HTTPException(status_code=409, detail=f"Cannot accept transaction in status '{tx.status}'")
 
     tx.status = "funding_in_progress"
+    tx.funding_deadline = datetime.utcnow() + timedelta(days=settings.FUNDING_DEADLINE_DAYS)
     create_notification(
         db, tx.buyer_id,
         "Seller Accepted Your Transaction",
@@ -356,6 +404,12 @@ def accept_transaction(
         "transaction", related_item_id=tx.id, related_item_type="transaction",
     )
     db.commit()
+    try:
+        from app.services.tasks import enforce_funding_deadline
+
+        enforce_funding_deadline.apply_async(args=[tx.id], eta=tx.funding_deadline)
+    except Exception:
+        pass
     return {"message": "Transaction accepted. Buyer can now fund milestones."}
 
 
@@ -391,13 +445,13 @@ def decline_transaction(
 def fund_milestone(
     transaction_id: str,
     milestone_id: str,
+    body: FundMilestoneBody = Body(default=FundMilestoneBody()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Buyer funds a milestone: deducts from wallet available balance,
-    adds to wallet escrow balance. Milestone becomes 'funded'.
-    Transaction activates when ≥1 milestone is funded.
+    Buyer funds a milestone (full or partial). Funds stay inactive until the milestone is 100% funded.
+    Transaction becomes Active when ≥1 milestone is fully funded.
     """
     if current_user.wallet_frozen:
         raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
@@ -416,87 +470,98 @@ def fund_milestone(
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
     if milestone.is_funded:
-        raise HTTPException(status_code=409, detail="Milestone is already funded")
+        raise HTTPException(status_code=409, detail="Milestone is already fully funded")
 
     currency = milestone.currency or tx.currency
-    amount = milestone.amount
+    target = float(milestone.amount)
+    already = float(milestone.funded_amount or 0)
+    remaining = round(target - already, 8)
+    if remaining <= 0:
+        raise HTTPException(status_code=409, detail="Milestone is already fully funded")
 
-    # Check buyer wallet balance
+    pay_raw = body.amount if body.amount is not None else remaining
+    pay = round(min(float(pay_raw), remaining), 8)
+    if pay <= 0:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Funding amount must be greater than zero."})
+
     balance = db.query(WalletBalance).filter(
         WalletBalance.user_id == current_user.id,
         WalletBalance.currency == currency,
     ).first()
-    if not balance or balance.amount < amount:
+    if not balance or balance.amount < pay:
         available = balance.amount if balance else 0.0
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "INSUFFICIENT_FUNDS",
-                "message": f"Insufficient balance. You have {currency} {available:.2f}, need {currency} {amount:.2f}. Please deposit funds first.",
+                "message": f"Insufficient balance. You have {currency} {available:.2f}, need {currency} {pay:.2f}. Please deposit funds first.",
             },
         )
 
-    # Deduct from available, add to escrow
-    balance.amount = round(balance.amount - amount, 8)
-    balance.escrow_amount = round((balance.escrow_amount or 0) + amount, 8)
+    balance.amount = round(balance.amount - pay, 8)
+    balance.escrow_amount = round((balance.escrow_amount or 0) + pay, 8)
 
-    # Mark milestone as funded
-    milestone.funded_amount = amount
-    milestone.is_funded = True
-    milestone.status = "funded"
-    milestone.auto_release_at = datetime.utcnow() + timedelta(days=AUTO_RELEASE_DAYS)
+    new_funded = round(already + pay, 8)
+    milestone.funded_amount = new_funded
+    became_fully_funded = new_funded >= target - 1e-9
+    if became_fully_funded:
+        milestone.is_funded = True
+        milestone.status = "funded"
+        milestone.funded_amount = target
+        tx.funded_milestones = (tx.funded_milestones or 0) + 1
+    else:
+        milestone.is_funded = False
+        milestone.status = "partially_funded"
 
-    # Ledger: buyer available → buyer escrow
-    db.add(LedgerEntry(
-        debit_user_id=current_user.id,
-        credit_user_id=current_user.id,
-        debit_account="available",
-        credit_account="escrow",
-        amount=amount,
-        currency=currency,
-        reference_type="milestone_fund",
-        reference_id=milestone_id,
-        description=f"Escrow lock for milestone '{milestone.title}'",
-    ))
-
-    # Wallet transaction audit trail
-    db.add(WalletTransaction(
-        user_id=current_user.id,
-        type="escrow_lock",
-        amount=amount,
-        currency=currency,
-        status="completed",
-        transaction_id=transaction_id,
-        milestone_id=milestone_id,
-        description=f"Escrow for milestone: {milestone.title}",
-    ))
-
-    # Activate transaction if first funded milestone
-    tx.funded_milestones = (tx.funded_milestones or 0) + 1
-    if tx.status in ("funding_in_progress", "partially_funded", "approved"):
-        tx.status = "active"
-
-    create_notification(
-        db, tx.seller_id or "",
-        "Milestone Funded — Work Can Begin",
-        f"'{milestone.title}' in '{tx.title}' has been funded ({currency} {amount:.2f}). You can start work.",
-        "transaction", related_item_id=tx.id, related_item_type="transaction",
+    db.add(
+        LedgerEntry(
+            debit_user_id=current_user.id,
+            credit_user_id=current_user.id,
+            debit_account="available",
+            credit_account="escrow",
+            amount=pay,
+            currency=currency,
+            reference_type="milestone_fund",
+            reference_id=milestone_id,
+            description=f"Escrow lock for milestone '{milestone.title}'",
+        )
+    )
+    db.add(
+        WalletTransaction(
+            user_id=current_user.id,
+            type="escrow_lock",
+            amount=pay,
+            currency=currency,
+            status="completed",
+            transaction_id=transaction_id,
+            milestone_id=milestone_id,
+            description=f"Escrow for milestone: {milestone.title}",
+        )
     )
 
-    # Schedule auto-release task
-    try:
-        from app.services.tasks import auto_release_milestone
-        auto_release_milestone.apply_async(
-            args=[milestone_id],
-            countdown=AUTO_RELEASE_DAYS * 86400,
+    all_ms = db.query(Milestone).filter(Milestone.transaction_id == tx.id).all()
+    if any(m.is_funded for m in all_ms):
+        tx.status = "active"
+    elif any((m.funded_amount or 0) > 0 and not m.is_funded for m in all_ms):
+        tx.status = "partially_funded"
+
+    if tx.seller_id:
+        create_notification(
+            db,
+            tx.seller_id,
+            "Milestone funding received",
+            f"'{milestone.title}' in '{tx.title}': {currency} {pay:.2f} added to escrow"
+            + (" — fully funded; you can start work." if became_fully_funded else " (partial — milestone not active until 100% funded)."),
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
         )
-    except Exception:
-        pass
 
     db.commit()
     return {
-        "message": f"Milestone '{milestone.title}' funded. Funds locked in escrow.",
-        "escrow_amount": amount,
+        "message": f"Milestone '{milestone.title}' funded." + (" Work may begin." if became_fully_funded else " Partial funding recorded."),
+        "funded_amount": milestone.funded_amount,
+        "is_funded": milestone.is_funded,
         "currency": currency,
     }
 
@@ -509,12 +574,11 @@ def fund_milestone(
 def submit_delivery(
     transaction_id: str,
     milestone_id: str,
-    delivery_note: Optional[str] = Body(None),
-    delivery_attachments: Optional[list] = Body(default=[]),
+    payload: DeliverySubmit,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Seller submits delivery. Milestone moves to 'delivered'. Buyer has AUTO_RELEASE_DAYS to review."""
+    """Seller submits structured delivery proof. Milestone moves to under_review until buyer acts or auto-release."""
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -532,24 +596,51 @@ def submit_delivery(
         raise HTTPException(status_code=409, detail=f"Cannot deliver milestone in status '{milestone.status}'")
 
     now = datetime.utcnow()
-    milestone.status = "delivered"
+    review_days = _auto_release_days_for_milestone(milestone_id)
+    milestone.status = "under_review"
     milestone.delivered_at = now
-    milestone.delivery_note = delivery_note
-    milestone.delivery_attachments = delivery_attachments or []
-    # Reset auto-release window from delivery time
-    milestone.auto_release_at = now + timedelta(days=AUTO_RELEASE_DAYS)
+    milestone.delivery_title = payload.delivery_title.strip()
+    milestone.delivery_note = payload.delivery_note.strip()
+    milestone.delivery_attachments = [a.strip() for a in payload.delivery_attachments if isinstance(a, str) and a.strip()]
+    milestone.delivery_external_links = [u.strip() for u in payload.delivery_external_links if isinstance(u, str) and u.strip()]
+    milestone.delivery_version_notes = payload.delivery_version_notes.strip() if payload.delivery_version_notes else None
+    milestone.invalid_delivery_reported = False
+    milestone.invalid_delivery_report_note = None
+    milestone.auto_release_at = now + timedelta(days=review_days)
 
     if tx.status == "active":
         tx.status = "in_progress"
 
-    create_notification(
-        db, tx.buyer_id,
-        "Delivery Submitted — Action Required",
-        f"'{milestone.title}' has been delivered by {current_user.first_name}. Review and approve or request a revision within {AUTO_RELEASE_DAYS} days.",
-        "transaction", related_item_id=tx.id, related_item_type="transaction",
+    _append_milestone_log(
+        milestone,
+        current_user.id,
+        "delivery_submitted",
+        {
+            "title": milestone.delivery_title,
+            "attachments_count": len(milestone.delivery_attachments),
+            "links_count": len(milestone.delivery_external_links or []),
+        },
     )
+
+    create_notification(
+        db,
+        tx.buyer_id,
+        "Delivery submitted — review required",
+        f"'{milestone.title}' is ready for review. Approve, request changes, or report an issue within {review_days} days.",
+        "transaction",
+        related_item_id=tx.id,
+        related_item_type="transaction",
+    )
+
+    try:
+        from app.services.tasks import auto_release_milestone
+
+        auto_release_milestone.apply_async(args=[milestone_id], countdown=review_days * 86400)
+    except Exception:
+        pass
+
     db.commit()
-    return {"message": "Delivery submitted. Awaiting buyer approval."}
+    return {"message": "Delivery submitted. Awaiting buyer review.", "auto_release_days": review_days}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -560,11 +651,13 @@ def submit_delivery(
 def approve_milestone(
     transaction_id: str,
     milestone_id: str,
-    feedback: Optional[str] = Body(None),
+    body: ApproveMilestoneBody = Body(default=ApproveMilestoneBody()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Buyer approves delivery. Escrow released instantly to seller available balance."""
+    from app.models.currency import PlatformSettings
+
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -576,10 +669,29 @@ def approve_milestone(
     ).first()
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
-    if milestone.status not in ("delivered", "funded", "in_progress"):
+    if milestone.status not in ("under_review", "delivered"):
         raise HTTPException(status_code=409, detail=f"Cannot approve milestone in status '{milestone.status}'")
 
-    _release_milestone_escrow(db, tx, milestone, feedback)
+    ps = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
+    threshold = ps.high_value_checklist_threshold if ps else None
+    if threshold is not None and float(milestone.amount) >= float(threshold):
+        c = body.checklist
+        if not c or not (c.files_received and c.matches_description and c.meets_requirements):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "CHECKLIST_REQUIRED",
+                    "message": "This milestone exceeds the high-value threshold. Confirm all checklist items before approving.",
+                },
+            )
+
+    _append_milestone_log(
+        milestone,
+        current_user.id,
+        "approved",
+        {"checklist": body.checklist.model_dump() if body.checklist else None},
+    )
+    _release_milestone_escrow(db, tx, milestone, body.feedback)
     db.commit()
     return {"message": "Milestone approved. Funds released to seller.", "amount": milestone.amount}
 
@@ -702,19 +814,73 @@ def request_revision(
     ).first()
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
-    if milestone.status != "delivered":
-        raise HTTPException(status_code=409, detail="Can only request revision on delivered milestones")
+    if milestone.status not in ("under_review", "delivered"):
+        raise HTTPException(status_code=409, detail="Can only request revision while delivery is under review")
 
     milestone.status = "revision_requested"
     milestone.revision_note = note
-    # Reset auto-release window — seller needs to re-deliver
     milestone.auto_release_at = None
+    _append_milestone_log(milestone, current_user.id, "revision_requested", {"note": note[:500]})
 
-    create_notification(
-        db, tx.seller_id,
-        "Revision Requested",
-        f"Buyer requested changes on '{milestone.title}': {note[:200]}",
-        "transaction", related_item_id=tx.id, related_item_type="transaction",
-    )
+    if tx.seller_id:
+        create_notification(
+            db,
+            tx.seller_id,
+            "Revision Requested",
+            f"Buyer requested changes on '{milestone.title}': {note[:200]}",
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
+        )
     db.commit()
     return {"message": "Revision requested. Seller will re-submit delivery."}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BUYER: Report invalid / empty delivery (escrow unchanged; audit trail)
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.post("/{transaction_id}/milestones/{milestone_id}/report-invalid-delivery")
+def report_invalid_delivery(
+    transaction_id: str,
+    milestone_id: str,
+    payload: InvalidDeliveryReport,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    note = payload.note
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if tx.buyer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the buyer can report delivery issues")
+
+    milestone = db.query(Milestone).filter(
+        Milestone.id == milestone_id, Milestone.transaction_id == transaction_id
+    ).first()
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    if milestone.status not in ("under_review", "delivered"):
+        raise HTTPException(status_code=409, detail="Invalid delivery can only be reported while the delivery is under review")
+
+    milestone.invalid_delivery_reported = True
+    milestone.invalid_delivery_report_note = note.strip()
+    _append_milestone_log(
+        milestone,
+        current_user.id,
+        "invalid_delivery_reported",
+        {"note": note.strip()[:500]},
+    )
+    if tx.seller_id:
+        create_notification(
+            db,
+            tx.seller_id,
+            "Buyer reported a delivery issue",
+            f"On '{milestone.title}': {note.strip()[:200]}",
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
+        )
+    db.commit()
+    return {"message": "Report recorded. You can still approve, request a revision, or open a dispute."}

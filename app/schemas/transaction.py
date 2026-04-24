@@ -1,7 +1,50 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Any
 from datetime import datetime
 from app.schemas.user import UserPublic
+
+
+class FundMilestoneBody(BaseModel):
+    """Omit amount to fund the remaining balance for this milestone."""
+    amount: Optional[float] = None
+
+
+class DeliverySubmit(BaseModel):
+    delivery_title: str = Field(..., min_length=3, max_length=300)
+    delivery_note: str = Field(..., min_length=10, description="What was delivered and how to verify it")
+    delivery_attachments: List[str] = Field(default_factory=list, description="Uploaded file keys or URLs")
+    delivery_external_links: List[str] = Field(default_factory=list)
+    delivery_version_notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_files_or_links_plus_note(self):
+        att = [a for a in (self.delivery_attachments or []) if isinstance(a, str) and a.strip()]
+        links = [u for u in (self.delivery_external_links or []) if isinstance(u, str) and u.strip()]
+        if att:
+            return self
+        if links:
+            # External proof: still require substantive note (already min 10)
+            for u in links:
+                u2 = u.strip().lower()
+                if not (u2.startswith("http://") or u2.startswith("https://")):
+                    raise ValueError("Each external link must start with http:// or https://")
+            return self
+        raise ValueError("Provide at least one delivery file (upload) or at least one valid external https link.")
+
+
+class BuyerChecklist(BaseModel):
+    files_received: bool = False
+    matches_description: bool = False
+    meets_requirements: bool = False
+
+
+class ApproveMilestoneBody(BaseModel):
+    feedback: Optional[str] = None
+    checklist: Optional[BuyerChecklist] = None
+
+
+class InvalidDeliveryReport(BaseModel):
+    note: str = Field(..., min_length=10)
 
 
 class MilestoneCreate(BaseModel):

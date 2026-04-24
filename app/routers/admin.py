@@ -1138,6 +1138,9 @@ def _settings_to_dict(s: PlatformSettings) -> dict:
         "withdrawal_fee_fixed": s.withdrawal_fee_fixed,
         "min_transaction_amount": s.min_transaction_amount,
         "max_transaction_amount": s.max_transaction_amount,
+        "high_value_checklist_threshold": getattr(s, "high_value_checklist_threshold", None),
+        "funding_deadline_days": getattr(s, "funding_deadline_days", 14),
+        "auto_release_days": getattr(s, "auto_release_days", 5),
         "platform_name": s.platform_name,
         "support_email": s.support_email,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
@@ -1165,6 +1168,9 @@ def update_platform_settings(
     withdrawal_fee_fixed: Optional[float] = Body(None),
     min_transaction_amount: Optional[float] = Body(None),
     max_transaction_amount: Optional[float] = Body(None),
+    high_value_checklist_threshold: Optional[float] = Body(None),
+    funding_deadline_days: Optional[int] = Body(None),
+    auto_release_days: Optional[int] = Body(None),
     platform_name: Optional[str] = Body(None),
     support_email: Optional[str] = Body(None),
     db: Session = Depends(get_db),
@@ -1188,6 +1194,17 @@ def update_platform_settings(
                 detail={"error": "FEE_SHARE_MISMATCH", "message": "buyer_fee_share + seller_fee_share must equal 100."},
             )
 
+    if funding_deadline_days is not None and not (1 <= int(funding_deadline_days) <= 366):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_FUNDING_DEADLINE", "message": "funding_deadline_days must be between 1 and 366."},
+        )
+    if auto_release_days is not None and not (3 <= int(auto_release_days) <= 7):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AUTO_RELEASE", "message": "auto_release_days must be between 3 and 7."},
+        )
+
     s = _get_settings(db)
     fields = {
         "escrow_fee_percent": escrow_fee_percent,
@@ -1201,6 +1218,9 @@ def update_platform_settings(
         "withdrawal_fee_fixed": withdrawal_fee_fixed,
         "min_transaction_amount": min_transaction_amount,
         "max_transaction_amount": max_transaction_amount,
+        "high_value_checklist_threshold": high_value_checklist_threshold,
+        "funding_deadline_days": funding_deadline_days,
+        "auto_release_days": auto_release_days,
         "platform_name": platform_name,
         "support_email": support_email,
     }
