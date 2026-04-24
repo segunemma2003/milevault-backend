@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 
 celery_app = Celery(
@@ -24,5 +25,14 @@ celery_app.conf.update(
         "app.services.tasks.process_kyc_document": {"queue": "kyc"},
         "app.services.tasks.process_refund": {"queue": "payments"},
     },
-    beat_schedule={},
+    beat_schedule={
+        "expire-stale-invitations-daily": {
+            "task": "app.services.tasks.expire_stale_invitations",
+            "schedule": crontab(hour=3, minute=15),
+        },
+        "stale-deal-activity-warnings-daily": {
+            "task": "app.services.tasks.stale_deal_activity_warnings",
+            "schedule": crontab(hour=4, minute=15),
+        },
+    },
 )

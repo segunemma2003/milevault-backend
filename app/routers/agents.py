@@ -1,9 +1,12 @@
 """
 Agent router — registration, specialty management, buyer requests, subscriptions, earnings.
 Rules enforced here:
-  - Agents CANNOT communicate with sellers or see seller private details.
+  - No direct private seller↔agent channel: mediated messages only (logged, visible to parties on the deal).
+  - Agents see transaction-level + milestone context and limited seller **public** trust fields (no email/phone).
+  - Verification fee is debited from the buyer when the agent **accepts**, held on-platform in ledger,
+    released to the agent wallet when the **transaction completes** (or refunded if the deal is cancelled).
   - Buyers (or admin) request agents; agents accept/decline.
-  - Agents upload evidence visible only to buyer + admin.
+  - Agents upload evidence visible to buyer + admin.
   - KYC verification is required before registering as an agent.
   - Subscription tier affects priority in the agent listing.
 """
@@ -14,8 +17,16 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.agent import (
-    Agent, AgentRequest, AgentSpecialty, AgentStatus, AgentRequestStatus,
-    AgentSubscriptionPlan, AgentSubscription, AgentServiceTier, AgentEarning,
+    Agent,
+    AgentRequest,
+    AgentRequestMessage,
+    AgentSpecialty,
+    AgentStatus,
+    AgentRequestStatus,
+    AgentSubscriptionPlan,
+    AgentSubscription,
+    AgentServiceTier,
+    AgentEarning,
 )
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -213,7 +224,9 @@ def get_my_earnings(
 
     return {
         "total_earned": agent.total_earnings,
-        "pending_payout": sum(e.agent_payout for e in earnings if e.status == "pending"),
+        "pending_payout": sum(
+            e.agent_payout for e in earnings if (e.status or "") in ("pending", "held")
+        ),
         "earnings": [
             {
                 "id": str(e.id),
@@ -476,8 +489,11 @@ def cancel_request(
         raise HTTPException(status_code=404, detail={"error": "REQUEST_NOT_FOUND", "message": "Request not found."})
     if str(req.buyer_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail={"error": "NOT_YOUR_REQUEST", "message": "You can only cancel your own requests."})
-    if req.status not in (AgentRequestStatus.pending, AgentRequestStatus.accepted):
+    if req.status not in (AgentRequestStatus.pending, AgentRequestStatus.accepted, AgentRequestStatus.active):
         raise HTTPException(status_code=409, detail={"error": "CANNOT_CANCEL", "message": f"Cannot cancel a '{req.status}' request."})
+    from app.services.agent_fee_service import refund_held_agent_fee_for_request
+
+    refund_held_agent_fee_for_request(db, req)
     req.status = AgentRequestStatus.cancelled
     db.commit()
     return {"message": "Agent request cancelled."}
@@ -516,19 +532,22 @@ def respond_to_request(
     if action not in ("accept", "decline"):
         raise HTTPException(status_code=422, detail={"error": "INVALID_ACTION", "message": "Action must be 'accept' or 'decline'."})
 
-    req.status = AgentRequestStatus.active if action == "accept" else AgentRequestStatus.declined
+    if action == "accept":
+        try:
+            from app.services.agent_fee_service import hold_agent_fee_on_agent_accept
 
-    if action == "accept" and req.fee_charged and req.agent_payout_amount:
-        earning = AgentEarning(
-            agent_id=agent.id,
-            request_id=req.id,
-            gross_fee=req.fee_charged,
-            agent_payout=req.agent_payout_amount,
-            platform_cut=req.fee_charged - req.agent_payout_amount,
-            currency=req.fee_currency or "USD",
-            status="pending",
-        )
-        db.add(earning)
+            hold_agent_fee_on_agent_accept(db, req)
+        except ValueError as exc:
+            msg = str(exc)
+            if msg.startswith("INSUFFICIENT_FUNDS"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "INSUFFICIENT_FUNDS", "message": msg.split(":", 1)[-1].strip()},
+                )
+            raise HTTPException(status_code=400, detail={"error": "AGENT_FEE_HOLD_FAILED", "message": msg})
+        req.status = AgentRequestStatus.active
+    else:
+        req.status = AgentRequestStatus.declined
 
     _notify(db, str(req.buyer_id), "Agent Response",
             f"Agent {'accepted' if action == 'accept' else 'declined'} your verification request.")
@@ -602,9 +621,6 @@ def complete_request(
     if final_notes:
         req.agent_notes = final_notes
     agent.total_verifications += 1
-    if req.agent_payout_amount:
-        agent.total_earnings += req.agent_payout_amount
-
     _notify(db, str(req.buyer_id), "Agent Completed Verification",
             "Your agent has completed verification. Review the evidence in your transaction details.")
     db.commit()
@@ -627,6 +643,16 @@ def agent_view_transaction(
         raise HTTPException(status_code=403, detail={"error": "ACCESS_DENIED", "message": "Not assigned to this transaction."})
 
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    seller = tx.seller
+    seller_public = None
+    if seller:
+        initial = (seller.first_name or "S")[0].upper()
+        seller_public = {
+            "display_label": f"{initial}.",
+            "rating": seller.rating,
+            "completion_rate": seller.completion_rate,
+            "kyc_verified": bool(seller.is_kyc_verified),
+        }
     return {
         "id": tx.id,
         "title": tx.title,
@@ -647,5 +673,111 @@ def agent_view_transaction(
             }
             for m in (tx.milestones or [])
         ],
-        "seller_info": "REDACTED — Agents do not have access to seller contact details.",
+        "seller_public": seller_public,
+        "seller_contact": None,
+        "mediated_messages_path": f"/agents/request/{req.id}/messages",
+    }
+
+
+def _message_authorization(db: Session, req: AgentRequest, user: User) -> Optional[str]:
+    tx = db.query(Transaction).filter(Transaction.id == req.transaction_id).first()
+    if not tx:
+        return None
+    if user.is_admin:
+        return "admin"
+    if str(req.buyer_id) == str(user.id):
+        return "buyer"
+    if tx.seller_id and str(tx.seller_id) == str(user.id):
+        return "seller"
+    agent = db.query(Agent).filter(Agent.id == str(req.agent_id)).first()
+    if agent and str(agent.user_id) == str(user.id):
+        return "agent"
+    return None
+
+
+class AgentRequestMessageCreate(BaseModel):
+    body: str
+
+
+@router.get("/request/{request_id}/messages", summary="Mediated Q&A on an agent request (buyer, seller, agent, admin)")
+def list_agent_request_messages(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    req = db.query(AgentRequest).filter(AgentRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Request not found."})
+    if _message_authorization(db, req, current_user) is None:
+        raise HTTPException(status_code=403, detail={"error": "ACCESS_DENIED", "message": "Not a party on this agent request."})
+    rows = (
+        db.query(AgentRequestMessage)
+        .filter(AgentRequestMessage.agent_request_id == request_id)
+        .order_by(AgentRequestMessage.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": str(m.id),
+            "author_user_id": str(m.author_user_id),
+            "author_role": m.author_role,
+            "body": m.body,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in rows
+    ]
+
+
+@router.post("/request/{request_id}/messages", status_code=status.HTTP_201_CREATED, summary="Post a mediated message (logged)")
+def post_agent_request_message(
+    request_id: str,
+    payload: AgentRequestMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    body = (payload.body or "").strip()
+    if len(body) < 2:
+        raise HTTPException(status_code=422, detail={"error": "EMPTY", "message": "Message is too short."})
+    if len(body) > 8000:
+        raise HTTPException(status_code=422, detail={"error": "TOO_LONG", "message": "Message exceeds 8000 characters."})
+
+    req = db.query(AgentRequest).filter(AgentRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Request not found."})
+    role = _message_authorization(db, req, current_user)
+    if role is None:
+        raise HTTPException(status_code=403, detail={"error": "ACCESS_DENIED", "message": "Not a party on this agent request."})
+    if req.status not in (AgentRequestStatus.active, AgentRequestStatus.pending):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "INACTIVE_REQUEST", "message": "Messages are only open for pending or active requests."},
+        )
+
+    msg = AgentRequestMessage(
+        agent_request_id=str(req.id),
+        author_user_id=str(current_user.id),
+        author_role=role,
+        body=body,
+    )
+    db.add(msg)
+    # Notify other parties (best-effort)
+    tx = db.query(Transaction).filter(Transaction.id == req.transaction_id).first()
+    notify_ids = {str(req.buyer_id)}
+    if tx and tx.seller_id:
+        notify_ids.add(str(tx.seller_id))
+    if req.agent_id:
+        ag = db.query(Agent).filter(Agent.id == str(req.agent_id)).first()
+        if ag:
+            notify_ids.add(str(ag.user_id))
+    notify_ids.discard(str(current_user.id))
+    for uid in notify_ids:
+        _notify(db, uid, "Agent thread update", f"New {role} message on '{tx.title if tx else 'transaction'}'.", "agent")
+    db.commit()
+    db.refresh(msg)
+    return {
+        "id": str(msg.id),
+        "author_user_id": str(msg.author_user_id),
+        "author_role": msg.author_role,
+        "body": msg.body,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
     }

@@ -361,6 +361,9 @@ def enforce_funding_deadline(self, transaction_id: str) -> dict:
                     related_item_id=tx.id,
                     related_item_type="transaction",
                 )
+            from app.services.agent_fee_service import refund_held_agent_fees_for_transaction
+
+            refund_held_agent_fees_for_transaction(db, tx)
             db.commit()
             return {"status": "cancelled", "refunded": refunded}
 
@@ -439,6 +442,127 @@ def process_refund(self, refund_id: str) -> dict:
         logger.info(f"Refund {refund_id} completed")
         return {"status": "completed", "refund_id": refund_id}
 
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    name="app.services.tasks.expire_stale_invitations",
+)
+def expire_stale_invitations(self) -> dict:
+    """
+    Auto-cancel pending_approval transactions where the invitee never accepted
+    within invite_expiry_days. Notifies buyer and seller.
+    """
+    from datetime import datetime, timedelta
+    from app.database import SessionLocal
+    from app.models.transaction import Transaction
+    from app.services.platform_timeline import get_invite_expiry_days
+    from app.services.notification_service import create_notification
+    from app.services.agent_fee_service import refund_held_agent_fees_for_transaction
+
+    db = SessionLocal()
+    try:
+        days = get_invite_expiry_days(db)
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        txs = (
+            db.query(Transaction)
+            .filter(Transaction.status == "pending_approval", Transaction.created_at < cutoff)
+            .all()
+        )
+        n = 0
+        for tx in txs:
+            refund_held_agent_fees_for_transaction(db, tx)
+            tx.status = "cancelled"
+            create_notification(
+                db,
+                str(tx.buyer_id),
+                "Invitation expired",
+                f"'{tx.title}' was cancelled after {days} days with no acceptance.",
+                "transaction",
+                related_item_id=str(tx.id),
+                related_item_type="transaction",
+            )
+            if tx.seller_id:
+                create_notification(
+                    db,
+                    str(tx.seller_id),
+                    "Invitation expired",
+                    f"'{tx.title}' was cancelled after {days} days with no acceptance.",
+                    "transaction",
+                    related_item_id=str(tx.id),
+                    related_item_type="transaction",
+                )
+            n += 1
+        db.commit()
+        return {"status": "ok", "expired_count": n}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    name="app.services.tasks.stale_deal_activity_warnings",
+)
+def stale_deal_activity_warnings(self) -> dict:
+    """
+    One-time notification when active/in_progress deals have had no updates
+    for stale_activity_warn_days (clears clutter / prompts parties to act).
+    """
+    from datetime import datetime, timedelta
+    from app.database import SessionLocal
+    from app.models.transaction import Transaction
+    from app.services.platform_timeline import get_stale_activity_warn_days
+    from app.services.notification_service import create_notification
+
+    db = SessionLocal()
+    try:
+        days = get_stale_activity_warn_days(db)
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        q = db.query(Transaction).filter(
+            Transaction.status.in_(("active", "in_progress")),
+            Transaction.updated_at < cutoff,
+            Transaction.stale_activity_warn_sent_at.is_(None),
+        )
+        txs = q.all()
+        n = 0
+        for tx in txs:
+            msg = (
+                f"No milestone activity has been recorded on '{tx.title}' for {days}+ days. "
+                "Please update the deal, complete milestones, or cancel if the work is abandoned."
+            )
+            create_notification(
+                db,
+                str(tx.buyer_id),
+                "Stale transaction reminder",
+                msg,
+                "transaction",
+                related_item_id=str(tx.id),
+                related_item_type="transaction",
+            )
+            if tx.seller_id:
+                create_notification(
+                    db,
+                    str(tx.seller_id),
+                    "Stale transaction reminder",
+                    msg,
+                    "transaction",
+                    related_item_id=str(tx.id),
+                    related_item_type="transaction",
+                )
+            tx.stale_activity_warn_sent_at = datetime.utcnow()
+            n += 1
+        db.commit()
+        return {"status": "ok", "warned_count": n}
     except Exception as exc:
         db.rollback()
         raise self.retry(exc=exc)

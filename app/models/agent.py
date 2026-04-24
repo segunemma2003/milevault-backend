@@ -94,6 +94,25 @@ class AgentRequest(Base):
     agent = relationship("Agent", back_populates="requests", foreign_keys=[agent_id])
     assigner = relationship("User", foreign_keys=[assigned_by])
     earning = relationship("AgentEarning", back_populates="request", uselist=False)
+    messages = relationship("AgentRequestMessage", back_populates="request", cascade="all, delete-orphan")
+
+
+class AgentRequestMessage(Base):
+    """
+    Mediated Q&A on an agent request: no direct seller↔agent private channel.
+    Visible to buyer, seller (party to tx), assigned agent, and admins via API rules.
+    """
+    __tablename__ = "agent_request_messages"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_request_id = Column(String, ForeignKey("agent_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    author_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # buyer | seller | agent | admin — who spoke (for audit); must match author_user_id role on tx
+    author_role = Column(String(20), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    request = relationship("AgentRequest", back_populates="messages")
 
 
 class AgentSubscriptionPlan(Base):

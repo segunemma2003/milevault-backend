@@ -17,3 +17,22 @@ ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS auto_release_days INTEGER
 
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS initiated_by_user_id VARCHAR REFERENCES users(id);
 UPDATE transactions SET initiated_by_user_id = buyer_id WHERE initiated_by_user_id IS NULL AND buyer_id IS NOT NULL;
+
+ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS flagged_high_risk BOOLEAN DEFAULT false;
+
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES milestones(id) ON DELETE SET NULL;
+
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS stale_activity_warn_sent_at TIMESTAMP;
+
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS invite_expiry_days INTEGER NOT NULL DEFAULT 30;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS stale_activity_warn_days INTEGER NOT NULL DEFAULT 90;
+
+CREATE TABLE IF NOT EXISTS agent_request_messages (
+    id VARCHAR PRIMARY KEY,
+    agent_request_id VARCHAR NOT NULL REFERENCES agent_requests(id) ON DELETE CASCADE,
+    author_user_id VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    author_role VARCHAR(20) NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_agent_request_messages_req ON agent_request_messages(agent_request_id);

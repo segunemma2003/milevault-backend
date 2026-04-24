@@ -36,6 +36,7 @@ class WalletTransaction(Base):
     milestone_id = Column(String, nullable=True)   # which milestone this escrow entry belongs to
     method = Column(String(50), nullable=True)
     reference = Column(String(100), nullable=True)
+    flagged_high_risk = Column(Boolean, default=False)  # admin queue: large amount / risk_score / dispute pattern
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

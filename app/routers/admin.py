@@ -565,6 +565,7 @@ def list_refunds(
             "id": str(r.id),
             "transaction_id": str(r.transaction_id),
             "dispute_id": str(r.dispute_id) if r.dispute_id else None,
+            "milestone_id": str(r.milestone_id) if getattr(r, "milestone_id", None) else None,
             "amount": r.amount,
             "currency": r.currency,
             "refund_to": str(r.refund_to),
@@ -583,6 +584,7 @@ def list_refunds(
 def create_refund(
     transaction_id: str = Body(...),
     dispute_id: Optional[str] = Body(None),
+    milestone_id: Optional[str] = Body(None),
     refund_to_user_id: str = Body(...),
     amount: float = Body(...),
     currency: str = Body(...),
@@ -620,9 +622,24 @@ def create_refund(
             },
         )
 
+    if milestone_id:
+        from app.models.transaction import Milestone
+
+        ms = (
+            db.query(Milestone)
+            .filter(Milestone.id == milestone_id, Milestone.transaction_id == transaction_id)
+            .first()
+        )
+        if not ms:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_MILESTONE", "message": "milestone_id does not belong to this transaction."},
+            )
+
     refund = Refund(
         transaction_id=transaction_id,
         dispute_id=dispute_id,
+        milestone_id=milestone_id,
         amount=amount,
         currency=currency.upper(),
         refund_to=refund_to_user_id,
@@ -1105,6 +1122,10 @@ def admin_update_dispute(
                 f"Your dispute '{dispute.title}' has been {new_status} by an admin."
                 + (f" Resolution: {resolution}" if resolution else ""),
             )
+        if new_status == "resolved":
+            from app.services.agent_fee_service import release_held_agent_fees_after_dispute_resolved
+
+            release_held_agent_fees_after_dispute_resolved(db, tx)
 
     db.commit()
     return {"message": f"Dispute updated to '{new_status}'.", "dispute_id": dispute_id}
@@ -1141,6 +1162,8 @@ def _settings_to_dict(s: PlatformSettings) -> dict:
         "high_value_checklist_threshold": getattr(s, "high_value_checklist_threshold", None),
         "funding_deadline_days": getattr(s, "funding_deadline_days", 14),
         "auto_release_days": getattr(s, "auto_release_days", 5),
+        "invite_expiry_days": getattr(s, "invite_expiry_days", 30),
+        "stale_activity_warn_days": getattr(s, "stale_activity_warn_days", 90),
         "platform_name": s.platform_name,
         "support_email": s.support_email,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
@@ -1171,6 +1194,8 @@ def update_platform_settings(
     high_value_checklist_threshold: Optional[float] = Body(None),
     funding_deadline_days: Optional[int] = Body(None),
     auto_release_days: Optional[int] = Body(None),
+    invite_expiry_days: Optional[int] = Body(None),
+    stale_activity_warn_days: Optional[int] = Body(None),
     platform_name: Optional[str] = Body(None),
     support_email: Optional[str] = Body(None),
     db: Session = Depends(get_db),
@@ -1204,6 +1229,16 @@ def update_platform_settings(
             status_code=422,
             detail={"error": "INVALID_AUTO_RELEASE", "message": "auto_release_days must be between 3 and 7."},
         )
+    if invite_expiry_days is not None and not (7 <= int(invite_expiry_days) <= 180):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INVITE_EXPIRY", "message": "invite_expiry_days must be between 7 and 180."},
+        )
+    if stale_activity_warn_days is not None and not (30 <= int(stale_activity_warn_days) <= 730):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_STALE_WARN", "message": "stale_activity_warn_days must be between 30 and 730."},
+        )
 
     s = _get_settings(db)
     fields = {
@@ -1221,6 +1256,8 @@ def update_platform_settings(
         "high_value_checklist_threshold": high_value_checklist_threshold,
         "funding_deadline_days": funding_deadline_days,
         "auto_release_days": auto_release_days,
+        "invite_expiry_days": invite_expiry_days,
+        "stale_activity_warn_days": stale_activity_warn_days,
         "platform_name": platform_name,
         "support_email": support_email,
     }
@@ -1290,6 +1327,7 @@ def list_withdrawals(
             "method": t.method,
             "description": t.description,
             "reference": t.reference,
+            "flagged_high_risk": bool(getattr(t, "flagged_high_risk", False)),
             "created_at": t.created_at.isoformat() if t.created_at else None,
         })
     return {"withdrawals": result, "total": len(result)}

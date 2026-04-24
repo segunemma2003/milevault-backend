@@ -431,6 +431,8 @@ def withdraw(
         current_user.risk_score = min(100.0, float(current_user.risk_score or 0) + 1.0)
 
     bank_note = f" | {payload.bank_details}" if payload.bank_details else ""
+    from app.services.reputation_limits import withdrawal_flagged_high_risk
+
     txn = WalletTransaction(
         user_id=current_user.id,
         type="withdrawal",
@@ -439,6 +441,7 @@ def withdraw(
         status="pending",
         description=f"Withdrawal via {payload.method}{bank_note}",
         method=payload.method,
+        flagged_high_risk=withdrawal_flagged_high_risk(current_user, float(payload.amount)),
     )
     db.add(txn)
     db.commit()
@@ -642,7 +645,12 @@ def list_currencies(db: Session = Depends(get_db)):
 def platform_info(db: Session = Depends(get_db)):
     """Public endpoint returning platform fee and currency info for the fee calculator."""
     from app.models.currency import PlatformSettings
-    from app.services.platform_timeline import get_funding_deadline_days, get_auto_release_days
+    from app.services.platform_timeline import (
+        get_funding_deadline_days,
+        get_auto_release_days,
+        get_invite_expiry_days,
+        get_stale_activity_warn_days,
+    )
 
     settings = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
     return {
@@ -653,6 +661,19 @@ def platform_info(db: Session = Depends(get_db)):
         "high_value_checklist_threshold": getattr(settings, "high_value_checklist_threshold", None) if settings else None,
         "funding_deadline_days": get_funding_deadline_days(db),
         "auto_release_days": get_auto_release_days(db),
+        "invite_expiry_days": get_invite_expiry_days(db),
+        "stale_activity_warn_days": get_stale_activity_warn_days(db),
+        "ledger_model": "double_entry",
+        "ledger_fields": ["debit_user_id", "credit_user_id", "debit_account", "credit_account", "amount", "reference_type", "reference_id"],
+        "custody_notice": (
+            "Customer funds for escrow are segregated in ledger accounts (buyer available / buyer escrow / seller available). "
+            "Deposits and payouts are processed through configured payment gateways (e.g. Paystack where enabled). "
+            "MileVault does not lend customer balances and does not use customer wallet funds for operational expenses."
+        ),
+        "payment_gateway_note": (
+            "Card and bank funding may be processed by third-party gateways such as Paystack depending on region and currency. "
+            "See your receipt and gateway terms for settlement timing."
+        ),
     }
 
 

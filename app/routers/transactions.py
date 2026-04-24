@@ -166,6 +166,26 @@ def create_transaction(
         buyer_id = current_user.id
         seller_id = counterparty.id if counterparty else None
 
+    buyer_user = db.query(User).filter(User.id == buyer_id).first()
+    seller_user = db.query(User).filter(User.id == seller_id).first() if seller_id else None
+    if not buyer_user:
+        raise HTTPException(status_code=500, detail="Buyer record missing")
+    from app.services.reputation_limits import max_deal_amount_for_parties
+
+    deal_cap = max_deal_amount_for_parties(db, buyer_user, seller_user)
+    if float(payload.amount) > deal_cap:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "REPUTATION_AMOUNT_CAP",
+                "message": (
+                    f"This deal amount exceeds the current limit ({deal_cap:,.2f}) based on the buyer/seller "
+                    "trust profile (ratings, dispute rate) and platform settings."
+                ),
+                "max_amount": deal_cap,
+            },
+        )
+
     tx = Transaction(
         title=payload.title,
         description=payload.description,
@@ -318,6 +338,9 @@ def cancel_transaction(
     elif tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can cancel")
 
+    from app.services.agent_fee_service import refund_held_agent_fees_for_transaction
+
+    refund_held_agent_fees_for_transaction(db, tx)
     tx.status = "cancelled"
     db.commit()
     return {"message": "Transaction cancelled"}
@@ -832,6 +855,9 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         seller = db.query(User).filter(User.id == tx.seller_id).first()
         if seller:
             seller.total_volume = round((seller.total_volume or 0) + amount, 2)
+        from app.services.agent_fee_service import release_held_agent_fees_for_transaction
+
+        release_held_agent_fees_for_transaction(db, tx)
 
     create_notification(
         db, tx.seller_id,

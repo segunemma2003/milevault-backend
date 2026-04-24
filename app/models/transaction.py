@@ -43,6 +43,7 @@ class Transaction(Base):
     locked_rate_to = Column(String(10), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    stale_activity_warn_sent_at = Column(DateTime, nullable=True)
 
     buyer = relationship("User", foreign_keys=[buyer_id], back_populates="transactions_as_buyer")
     seller = relationship("User", foreign_keys=[seller_id], back_populates="transactions_as_seller")

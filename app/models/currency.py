@@ -93,6 +93,7 @@ class Refund(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     transaction_id = Column(String, ForeignKey("transactions.id"), nullable=False)
     dispute_id = Column(String, ForeignKey("disputes.id"), nullable=True)
+    milestone_id = Column(String, ForeignKey("milestones.id", ondelete="SET NULL"), nullable=True)
     amount = Column(Float, nullable=False)
     currency = Column(String(10), nullable=False)
     refund_to = Column(String, ForeignKey("users.id"), nullable=False)
@@ -142,6 +143,11 @@ class PlatformSettings(Base):
     funding_deadline_days = Column(Integer, default=14, nullable=False)
     # Buyer inactivity window after delivery before auto-release (3–7)
     auto_release_days = Column(Integer, default=5, nullable=False)
+
+    # Auto-cancel pending invitations (pending_approval) after N days with no accept
+    invite_expiry_days = Column(Integer, default=30, nullable=False)
+    # Notify parties on active/in_progress deals with no updates for N days (one-time per tx)
+    stale_activity_warn_days = Column(Integer, default=90, nullable=False)
 
     updated_by = Column(String, ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
