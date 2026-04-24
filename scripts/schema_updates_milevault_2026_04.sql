@@ -1,6 +1,18 @@
 -- Run manually against existing PostgreSQL databases if tables were created before these columns existed.
 -- Safe to run once; ignore errors if columns already exist.
 
+-- Users: reputation + risk (required by app.models.user.User — fixes UndefinedColumn on Railway if DB is old)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS completion_rate DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS dispute_rate DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS total_volume DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS badges JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_frozen BOOLEAN DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS withdrawals_blocked BOOLEAN DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS withdrawal_cooldown_until TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION DEFAULT 0.0;
+
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_title VARCHAR(300);
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_external_links JSON DEFAULT '[]';
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_version_notes TEXT;
