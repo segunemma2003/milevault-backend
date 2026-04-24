@@ -1,4 +1,3 @@
-import hashlib
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
@@ -21,15 +20,7 @@ from app.models.user import User
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
-from app.config import settings
-
 router = APIRouter(prefix="/transactions", tags=["transactions"])
-
-
-def _auto_release_days_for_milestone(milestone_id: str) -> int:
-    """Deterministic 3–7 day buyer review window per milestone."""
-    n = int(hashlib.sha256(milestone_id.encode()).hexdigest()[:8], 16)
-    return 3 + (n % 5)
 
 
 def milestone_to_public_dict(m: Milestone) -> Dict[str, Any]:
@@ -395,8 +386,10 @@ def accept_transaction(
     if tx.status not in ("pending_acceptance", "pending_approval"):
         raise HTTPException(status_code=409, detail=f"Cannot accept transaction in status '{tx.status}'")
 
+    from app.services.platform_timeline import get_funding_deadline_days
+
     tx.status = "funding_in_progress"
-    tx.funding_deadline = datetime.utcnow() + timedelta(days=settings.FUNDING_DEADLINE_DAYS)
+    tx.funding_deadline = datetime.utcnow() + timedelta(days=get_funding_deadline_days(db))
     create_notification(
         db, tx.buyer_id,
         "Seller Accepted Your Transaction",
@@ -595,8 +588,10 @@ def submit_delivery(
     if milestone.status not in ("funded", "in_progress", "revision_requested"):
         raise HTTPException(status_code=409, detail=f"Cannot deliver milestone in status '{milestone.status}'")
 
+    from app.services.platform_timeline import get_auto_release_days
+
     now = datetime.utcnow()
-    review_days = _auto_release_days_for_milestone(milestone_id)
+    review_days = get_auto_release_days(db)
     milestone.status = "under_review"
     milestone.delivered_at = now
     milestone.delivery_title = payload.delivery_title.strip()

@@ -12,3 +12,5 @@ ALTER TABLE disputes ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES mi
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS evidence_urls JSON DEFAULT '[]';
 
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS high_value_checklist_threshold DOUBLE PRECISION;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS funding_deadline_days INTEGER NOT NULL DEFAULT 14;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS auto_release_days INTEGER NOT NULL DEFAULT 5;

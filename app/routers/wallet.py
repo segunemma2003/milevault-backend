@@ -642,6 +642,8 @@ def list_currencies(db: Session = Depends(get_db)):
 def platform_info(db: Session = Depends(get_db)):
     """Public endpoint returning platform fee and currency info for the fee calculator."""
     from app.models.currency import PlatformSettings
+    from app.services.platform_timeline import get_funding_deadline_days, get_auto_release_days
+
     settings = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
     return {
         "escrow_fee_percent": settings.escrow_fee_percent if settings else 2.5,
@@ -649,6 +651,8 @@ def platform_info(db: Session = Depends(get_db)):
         "max_fee_amount": settings.max_fee_amount if settings else None,
         "fee_currency": settings.fee_currency if settings else "USD",
         "high_value_checklist_threshold": getattr(settings, "high_value_checklist_threshold", None) if settings else None,
+        "funding_deadline_days": get_funding_deadline_days(db),
+        "auto_release_days": get_auto_release_days(db),
     }
 
 
