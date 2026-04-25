@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # Admin seed
     ADMIN_PASSWORD: str = ""           # Used by seed_admin.py on first deploy
 
+    # Blockchain explorer keys (optional — free-tier rate limits apply without them)
+    ETHERSCAN_API_KEY: str = ""        # https://etherscan.io/apis
+    BSCSCAN_API_KEY: str = ""          # https://bscscan.com/apis
+
     # Payment gateways
     PAYSTACK_SECRET_KEY: str = ""      # sk_live_xxx or sk_test_xxx
     PAYSTACK_PUBLIC_KEY: str = ""

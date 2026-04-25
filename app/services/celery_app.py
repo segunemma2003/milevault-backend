@@ -34,5 +34,9 @@ celery_app.conf.update(
             "task": "app.services.tasks.stale_deal_activity_warnings",
             "schedule": crontab(hour=4, minute=15),
         },
+        "scan-crypto-deposits-every-5min": {
+            "task": "app.services.tasks.scan_crypto_deposits",
+            "schedule": crontab(minute="*/5"),
+        },
     },
 )

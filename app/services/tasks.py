@@ -476,3 +476,97 @@ def stale_deal_activity_warnings(self) -> dict:
         raise self.retry(exc=exc)
     finally:
         db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    name="app.services.tasks.scan_crypto_deposits",
+)
+def scan_crypto_deposits(self) -> dict:
+    """
+    Periodic task: poll each configured crypto deposit address for new incoming transactions.
+    Detected transactions are saved as CryptoPendingDeposit records and admin is notified.
+    Run every ~5 minutes via Celery beat.
+    """
+    from app.database import SessionLocal
+    from app.models.crypto import CryptoDepositAddress, CryptoPendingDeposit, NETWORK_CURRENCIES
+    from app.services.crypto_scanner import scan_network
+    from app.services.notification_service import create_notification
+    from app.config import settings
+    from datetime import datetime
+
+    db = SessionLocal()
+    total_new = 0
+    try:
+        addresses = db.query(CryptoDepositAddress).filter(CryptoDepositAddress.is_active == True).all()
+        scan_config = {
+            "etherscan_key": getattr(settings, "ETHERSCAN_API_KEY", ""),
+            "bscscan_key": getattr(settings, "BSCSCAN_API_KEY", ""),
+        }
+
+        for dep_addr in addresses:
+            try:
+                txs = scan_network(
+                    dep_addr.network,
+                    dep_addr.address,
+                    dep_addr.last_scanned_cursor,
+                    scan_config,
+                )
+            except Exception as e:
+                logger.warning(f"scan_network({dep_addr.network}) failed: {e}")
+                continue
+
+            new_cursor = dep_addr.last_scanned_cursor
+            for tx in txs:
+                tx_hash = tx.get("tx_hash", "")
+                if not tx_hash:
+                    continue
+                already = db.query(CryptoPendingDeposit).filter(
+                    CryptoPendingDeposit.tx_hash == tx_hash
+                ).first()
+                if already:
+                    continue
+
+                deposit = CryptoPendingDeposit(
+                    network=dep_addr.network,
+                    tx_hash=tx_hash,
+                    from_address=tx.get("from_address"),
+                    to_address=dep_addr.address,
+                    amount_crypto=tx.get("amount_crypto", 0),
+                    currency=NETWORK_CURRENCIES.get(dep_addr.network, "CRYPTO"),
+                    confirmations=tx.get("confirmations", 0),
+                    block_number=tx.get("block_number", ""),
+                    status="detected",
+                )
+                db.add(deposit)
+                total_new += 1
+                if new_cursor != tx_hash:
+                    new_cursor = tx_hash
+                logger.info(f"New crypto deposit detected: {tx_hash} ({dep_addr.network})")
+
+            dep_addr.last_scanned_at = datetime.utcnow()
+            if new_cursor:
+                dep_addr.last_scanned_cursor = new_cursor
+
+        db.commit()
+
+        if total_new > 0:
+            # Notify all admins
+            from app.models.user import User
+            admins = db.query(User).filter(User.is_admin == True, User.is_active == True).all()
+            for admin in admins:
+                create_notification(
+                    db, admin.id,
+                    "New Crypto Deposits Detected",
+                    f"{total_new} new incoming crypto transaction(s) detected and awaiting approval.",
+                    "payment",
+                )
+            db.commit()
+
+        return {"status": "ok", "new_deposits": total_new}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()

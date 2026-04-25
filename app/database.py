@@ -41,7 +41,7 @@ def _incremental_schema_statements() -> list[str]:
 
 def create_tables():
     from app.models import user, transaction, wallet, dispute, message, kyc, notification  # noqa
-    from app.models import agent, currency  # noqa
+    from app.models import agent, currency, crypto  # noqa
     Base.metadata.create_all(bind=engine)
     # create_all does not add new columns to existing tables — apply idempotent ALTERs
     # against the same DATABASE_URL the app uses (fixes Railway drift vs CLI migrations).
