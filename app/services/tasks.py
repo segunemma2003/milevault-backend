@@ -570,3 +570,43 @@ def scan_crypto_deposits(self) -> dict:
         raise self.retry(exc=exc)
     finally:
         db.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    name="app.services.tasks.cleanup_unverified_accounts",
+)
+def cleanup_unverified_accounts(self) -> dict:
+    """
+    Delete unverified accounts whose email verification window has expired.
+    This enforces strict verification TTL even if users never return to the app.
+    """
+    from datetime import datetime
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        from app.models.user import User
+
+        expired = (
+            db.query(User)
+            .filter(
+                User.is_email_verified == False,
+                User.email_verification_expires_at.isnot(None),
+                User.email_verification_expires_at < datetime.utcnow(),
+            )
+            .all()
+        )
+        count = len(expired)
+        for u in expired:
+            db.delete(u)
+        db.commit()
+        if count:
+            logger.info("Deleted %s expired unverified accounts", count)
+        return {"status": "ok", "deleted": count}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()

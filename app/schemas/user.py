@@ -75,6 +75,7 @@ class UserSettingsOut(BaseModel):
     marketing_notifications: bool
     security_notifications: bool
     default_currency: str
+    interface_language: str = "en"
     two_factor_enabled: bool
 
     model_config = {"from_attributes": True}
@@ -89,4 +90,5 @@ class UpdateSettingsRequest(BaseModel):
     marketing_notifications: Optional[bool] = None
     security_notifications: Optional[bool] = None
     default_currency: Optional[str] = None
+    interface_language: Optional[str] = None
     two_factor_enabled: Optional[bool] = None

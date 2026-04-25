@@ -38,5 +38,9 @@ celery_app.conf.update(
             "task": "app.services.tasks.scan_crypto_deposits",
             "schedule": crontab(minute="*/5"),
         },
+        "cleanup-unverified-accounts-every-5min": {
+            "task": "app.services.tasks.cleanup_unverified_accounts",
+            "schedule": crontab(minute="*/5"),
+        },
     },
 )

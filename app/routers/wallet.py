@@ -8,6 +8,7 @@ Deposit flow:
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Header
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import Optional
 from datetime import datetime, timedelta
 from app.database import get_db
@@ -456,6 +457,65 @@ def reconcile_deposit_endpoint(
         "currency": result["currency"],
         "new_balance": balance.amount,
         "wallet_transaction_id": str(txn.id),
+    }
+
+
+@router.post("/deposit/reconcile-pending")
+def reconcile_pending_deposits(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fallback verifier: tries to reconcile all user's pending paystack deposits
+    that have a reference, for cases where webhook/callback did not complete.
+    """
+    pending = db.query(WalletTransaction).filter(
+        WalletTransaction.user_id == current_user.id,
+        WalletTransaction.type == "deposit",
+        WalletTransaction.status == "pending",
+        WalletTransaction.method == "paystack",
+        WalletTransaction.reference.isnot(None),
+        WalletTransaction.reference != "",
+    ).order_by(WalletTransaction.created_at.asc()).limit(25).all()
+
+    recovered = 0
+    checked = 0
+    failed = 0
+    for txn in pending:
+        checked += 1
+        try:
+            result = verify_deposit(gateway="paystack", reference=txn.reference, db=db)
+            if not result["success"]:
+                continue
+            _apply_verified_deposit(
+                db=db,
+                user_id=current_user.id,
+                gateway="paystack",
+                reference=result["reference"],
+                amount=result["amount"],
+                currency=result["currency"],
+                wallet_transaction_id=str(txn.id),
+            )
+            recovered += 1
+        except Exception:
+            failed += 1
+
+    # Also try legacy pending rows with missing reference by matching latest successful
+    # verify from gateway is impossible without reference, so these are intentionally skipped.
+    legacy_missing_ref = db.query(WalletTransaction).filter(
+        WalletTransaction.user_id == current_user.id,
+        WalletTransaction.type == "deposit",
+        WalletTransaction.status == "pending",
+        WalletTransaction.method == "paystack",
+        or_(WalletTransaction.reference.is_(None), WalletTransaction.reference == ""),
+    ).count()
+
+    return {
+        "checked": checked,
+        "recovered": recovered,
+        "failed": failed,
+        "legacy_missing_reference_pending": legacy_missing_ref,
+        "message": "Pending Paystack deposits reconciled.",
     }
 
 

@@ -15,6 +15,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION DEFAULT 0
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR(128);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMP;
 CREATE INDEX IF NOT EXISTS ix_users_email_verification_token ON users(email_verification_token);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token VARCHAR(128);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMP;
+CREATE INDEX IF NOT EXISTS ix_users_password_reset_token ON users(password_reset_token);
+ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS interface_language VARCHAR(20) DEFAULT 'en';
 
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_title VARCHAR(300);
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_external_links JSON DEFAULT '[]';
