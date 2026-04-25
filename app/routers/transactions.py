@@ -491,9 +491,9 @@ def accept_transaction(
         )
     db.commit()
     try:
-        from app.services.tasks import cancel_unfunded_transaction
+        from app.services.tasks import enforce_funding_deadline
 
-        cancel_unfunded_transaction.apply_async(args=[tx.id], eta=tx.funding_deadline)
+        enforce_funding_deadline.apply_async(args=[tx.id], eta=tx.funding_deadline)
     except Exception:
         pass
     return {"message": "Invitation accepted. Funding can begin when the buyer funds milestones."}
@@ -667,6 +667,49 @@ def fund_milestone(
         "is_funded": milestone.is_funded,
         "currency": currency,
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SELLER: Start work on a funded milestone (funded → in_progress)
+# ══════════════════════════════════════════════════════════════════
+
+@router.post("/{transaction_id}/milestones/{milestone_id}/start")
+def start_milestone(
+    transaction_id: str,
+    milestone_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Seller explicitly marks a funded milestone as in progress."""
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if tx.seller_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the seller can start work on a milestone")
+
+    milestone = db.query(Milestone).filter(
+        Milestone.id == milestone_id, Milestone.transaction_id == transaction_id
+    ).first()
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    if not milestone.is_funded:
+        raise HTTPException(status_code=409, detail="Cannot start an unfunded milestone")
+    if milestone.status != "funded":
+        raise HTTPException(status_code=409, detail=f"Milestone is already in status '{milestone.status}'")
+
+    milestone.status = "in_progress"
+    _append_milestone_log(milestone, current_user.id, "work_started", {})
+
+    create_notification(
+        db, tx.buyer_id,
+        "Work Started",
+        f"Seller has started work on '{milestone.title}'.",
+        "transaction",
+        related_item_id=tx.id,
+        related_item_type="transaction",
+    )
+    db.commit()
+    return {"message": f"Milestone '{milestone.title}' is now in progress."}
 
 
 # ══════════════════════════════════════════════════════════════════
