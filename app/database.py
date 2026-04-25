@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -16,6 +17,7 @@ if _needs_ssl and "sslmode" not in _db_url:
 engine = create_engine(_db_url)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+_schema_log = logging.getLogger(__name__)
 
 
 def get_db():
@@ -46,7 +48,24 @@ def create_tables():
     if engine.dialect.name != "postgresql":
         return
     stmts = _incremental_schema_statements()
-    if stmts:
-        with engine.begin() as conn:
-            for stmt in stmts:
+    # One transaction per statement: if a late CREATE fails, PostgreSQL must not roll back
+    # earlier ALTER ADD COLUMN (e.g. transactions.funding_deadline).
+    for stmt in stmts:
+        head = stmt.lstrip()[:20].upper()
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(stmt))
+        except Exception as exc:
+            if head.startswith("CREATE TABLE") or head.startswith("CREATE INDEX"):
+                _schema_log.warning(
+                    "Incremental schema optional DDL failed (continuing): %s | %s",
+                    exc,
+                    stmt[:200],
+                )
+                continue
+            raise
+
+    # Second pass: anything the SQL file missed or failed to compile — matches live ORM models.
+    from app.schema_sync import apply_missing_columns_from_metadata
+
+    apply_missing_columns_from_metadata(engine, Base, log=_schema_log)

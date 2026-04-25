@@ -56,10 +56,11 @@ ALTER TABLE transactions ADD COLUMN IF NOT EXISTS stale_activity_warn_sent_at TI
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS invite_expiry_days INTEGER NOT NULL DEFAULT 30;
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS stale_activity_warn_days INTEGER NOT NULL DEFAULT 90;
 
+-- FKs omitted so bootstrap succeeds on DBs where agent_requests/users exist but CREATE order differs.
 CREATE TABLE IF NOT EXISTS agent_request_messages (
     id VARCHAR PRIMARY KEY,
-    agent_request_id VARCHAR NOT NULL REFERENCES agent_requests(id) ON DELETE CASCADE,
-    author_user_id VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    agent_request_id VARCHAR NOT NULL,
+    author_user_id VARCHAR NOT NULL,
     author_role VARCHAR(20) NOT NULL,
     body TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW()

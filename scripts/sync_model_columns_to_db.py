@@ -89,42 +89,21 @@ def main() -> int:
     Base, engine = _import_base_and_engine()
     _load_all_models()
 
-    from sqlalchemy import inspect, text
-    from sqlalchemy.schema import CreateColumn
-    from sqlalchemy.dialects import postgresql
-
-    dialect = postgresql.dialect()
-    alter_stmts: list[str] = []
+    from sqlalchemy import inspect
+    from app.schema_sync import apply_missing_columns_from_metadata, iter_missing_column_statements
 
     if not dry_run:
         Base.metadata.create_all(bind=engine)
 
-    insp = inspect(engine)
-    for table in Base.metadata.sorted_tables:
-        if not insp.has_table(table.name):
-            if dry_run:
-                print(f"-- Missing table (would be created with --apply): {table.name}", file=sys.stderr)
-            continue
-
-        db_cols = {c["name"].lower() for c in insp.get_columns(table.name)}
-        for col in table.columns:
-            if col.name.lower() in db_cols:
-                continue
-            try:
-                fragment = str(CreateColumn(col).compile(dialect=dialect))
-            except Exception as e:
-                print(
-                    f"-- SKIP {table.name}.{col.name}: compile failed ({e})",
-                    file=sys.stderr,
-                )
-                continue
-            qtable = f'"{table.name}"'
-            alter_stmts.append(f"ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {fragment}")
-
+    alter_stmts = list(iter_missing_column_statements(engine, Base))
     for stmt in alter_stmts:
         print(stmt)
 
     if dry_run:
+        insp = inspect(engine)
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                print(f"-- Missing table (would be created with --apply): {table.name}", file=sys.stderr)
         if alter_stmts:
             print(
                 f"\n{len(alter_stmts)} ALTER(s) above not executed; pass --apply to run.",
@@ -134,11 +113,9 @@ def main() -> int:
             print("\nNo missing columns on existing tables (tables may still be missing: use --apply).", file=sys.stderr)
         return 0
 
+    apply_missing_columns_from_metadata(engine, Base)
     if alter_stmts:
-        with engine.begin() as conn:
-            for stmt in alter_stmts:
-                conn.execute(text(stmt))
-        print(f"Applied {len(alter_stmts)} ADD COLUMN statement(s).", file=sys.stderr)
+        print(f"Applied ORM-driven ADD COLUMN pass ({len(alter_stmts)} statement(s) attempted).", file=sys.stderr)
     else:
         print("No ADD COLUMN statements needed.", file=sys.stderr)
 
