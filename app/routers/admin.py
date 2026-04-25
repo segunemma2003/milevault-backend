@@ -702,6 +702,8 @@ def list_users(
                 "is_admin": u.is_admin,
                 "is_agent": u.is_agent,
                 "is_kyc_verified": u.is_kyc_verified,
+                "wallet_frozen": bool(u.wallet_frozen),
+                "withdrawals_blocked": bool(u.withdrawals_blocked),
                 "country_code": u.country_code,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
             }

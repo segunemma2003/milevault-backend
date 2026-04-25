@@ -491,9 +491,9 @@ def accept_transaction(
         )
     db.commit()
     try:
-        from app.services.tasks import enforce_funding_deadline
+        from app.services.tasks import cancel_unfunded_transaction
 
-        enforce_funding_deadline.apply_async(args=[tx.id], eta=tx.funding_deadline)
+        cancel_unfunded_transaction.apply_async(args=[tx.id], eta=tx.funding_deadline)
     except Exception:
         pass
     return {"message": "Invitation accepted. Funding can begin when the buyer funds milestones."}
@@ -614,7 +614,7 @@ def fund_milestone(
         tx.funded_milestones = (tx.funded_milestones or 0) + 1
     else:
         milestone.is_funded = False
-        milestone.status = "partially_funded"
+        milestone.status = "pending"
 
     db.add(
         LedgerEntry(
