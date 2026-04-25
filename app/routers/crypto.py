@@ -179,7 +179,7 @@ def notify_deposit(
     )
     db.add(deposit)
     db.commit()
-    return {"message": "Deposit submitted for admin review. Your wallet will be credited once verified."}
+    return {"message": "Deposit submitted for admin review. Your wallet will be updated within 1 hour after verification."}
 
 
 # ════════════════════════════════════════════════════════════════════
