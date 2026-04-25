@@ -51,7 +51,7 @@ def _seed_admin() -> None:
                     logger.info(f"Admin flag set on existing user: {settings.ADMIN_EMAIL}")
                 return
 
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=10)
             import uuid
             admin = User(
                 id=str(uuid.uuid4()),
