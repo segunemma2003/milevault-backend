@@ -12,6 +12,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_frozen BOOLEAN DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS withdrawals_blocked BOOLEAN DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS withdrawal_cooldown_until TIMESTAMP;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR(128);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMP;
+CREATE INDEX IF NOT EXISTS ix_users_email_verification_token ON users(email_verification_token);
 
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_title VARCHAR(300);
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_external_links JSON DEFAULT '[]';

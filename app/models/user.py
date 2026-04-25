@@ -18,6 +18,8 @@ class User(Base):
     is_kyc_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     is_email_verified = Column(Boolean, default=False)
+    email_verification_token = Column(String(128), nullable=True, index=True)
+    email_verification_expires_at = Column(DateTime, nullable=True)
     is_admin = Column(Boolean, default=False)
     is_agent = Column(Boolean, default=False)
     phone = Column(String(50), nullable=True)

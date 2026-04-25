@@ -21,6 +21,20 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class RegisterResponse(BaseModel):
+    message: str
+    email: EmailStr
+    requires_email_verification: bool = True
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
