@@ -70,12 +70,19 @@ def get_gateway_for_country(
         if country_match and currency_match:
             return gw.name
 
-    # Hardcoded fallback
+    # Hardcoded fallback — prefer whichever gateway has a key configured
+    if settings.PAYSTACK_SECRET_KEY:
+        return PaymentGatewayName.paystack
+    if settings.STRIPE_SECRET_KEY:
+        return PaymentGatewayName.stripe
+    if settings.FLUTTERWAVE_SECRET_KEY:
+        return PaymentGatewayName.flutterwave
+    # Last resort by country
     if upper_country in _PAYSTACK_COUNTRIES:
         return PaymentGatewayName.paystack
     if upper_country in _STRIPE_COUNTRIES:
         return PaymentGatewayName.stripe
-    return PaymentGatewayName.flutterwave
+    return PaymentGatewayName.paystack
 
 
 # ─── Paystack ─────────────────────────────────────────────────────────────────
