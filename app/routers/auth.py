@@ -186,6 +186,22 @@ def register(payload: RegisterRequest, response: Response, background_tasks: Bac
     for currency in DEFAULT_CURRENCIES:
         db.add(WalletBalance(user_id=user.id, currency=currency, amount=0.0))
 
+    # Auto-link to any pending transactions that invited this email before they registered
+    try:
+        from app.models.transaction import Transaction
+        from sqlalchemy import func as sqlfunc
+        pending_invites = db.query(Transaction).filter(
+            sqlfunc.lower(Transaction.counterparty_email) == user.email,
+            Transaction.seller_id.is_(None),
+            Transaction.status.in_(["pending_approval", "pending_acceptance"]),
+        ).all()
+        for txn in pending_invites:
+            txn.seller_id = user.id
+        if pending_invites:
+            logger.info(f"Auto-linked {len(pending_invites)} pending transaction(s) to new user {user.email}")
+    except Exception as exc:
+        logger.warning(f"Auto-link transactions skipped: {exc}")
+
     db.commit()
     db.refresh(user)
     if require_email_verification and raw_token:

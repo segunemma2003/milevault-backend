@@ -21,7 +21,43 @@ from app.models.user import User
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
+from app.config import settings
+import logging
+logger = logging.getLogger("milevault.transactions")
+
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: str, tx_id: str) -> None:
+    """Email an unregistered counterparty inviting them to register and accept the transaction."""
+    register_url = f"{settings.FRONTEND_URL}/register"
+    body_html = (
+        f"<h2>You've been invited to a transaction on MileVault</h2>"
+        f"<p>Hi there,</p>"
+        f"<p><strong>{inviter_name}</strong> has invited you to participate in an escrow transaction: "
+        f"<strong>{tx_title}</strong>.</p>"
+        f"<p>MileVault is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
+        f"<p>To accept this invitation, create your free account:</p>"
+        f"<p><a href='{register_url}' style='display:inline-block;padding:10px 16px;background:#111827;color:#fff;"
+        f"text-decoration:none;border-radius:6px;'>Create Account &amp; Accept</a></p>"
+        f"<p>Once registered with this email address, the transaction will automatically appear in your dashboard.</p>"
+        f"<p>If you did not expect this invitation, you can safely ignore this email.</p>"
+    )
+    if not settings.RESEND_API_KEY:
+        logger.info(f"[DEV INVITE EMAIL] To: {to_email} | Tx: {tx_id}")
+        return
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            json={"from": f"MileVault <{settings.DEFAULT_FROM_EMAIL}>", "to": [to_email], "subject": f"You've been invited to '{tx_title}' on MileVault", "html": body_html},
+            headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
+            timeout=10,
+        )
+        if not resp.is_success:
+            logger.error(f"Resend invite email error {resp.status_code}: {resp.text}")
+    except Exception as exc:
+        logger.warning(f"Invite email failed ({to_email}): {exc}")
 
 
 def milestone_to_public_dict(m: Milestone) -> Dict[str, Any]:
@@ -134,6 +170,8 @@ def transaction_to_dict(tx: Transaction) -> dict:
             "service_fee_ratio": {"buyer": tx.buyer_fee_ratio, "seller": tx.seller_fee_ratio},
         },
         "milestones": [milestone_to_public_dict(m) for m in tx.milestones],
+        "counterparty_email": tx.counterparty_email,
+        "last_reminded_at": tx.last_reminded_at.isoformat() if getattr(tx, "last_reminded_at", None) else None,
     }
 
 
@@ -254,6 +292,15 @@ def create_transaction(
             related_item_id=tx.id,
             related_item_type="transaction",
         )
+    elif not seller_id and raw_email and payload.initiated_as == "buyer":
+        # Seller is not yet registered — send invite email in background
+        import threading
+        inviter_name = f"{current_user.first_name} {current_user.last_name}".strip()
+        threading.Thread(
+            target=_send_transaction_invite_email,
+            args=(raw_email, inviter_name, tx.title, tx.id),
+            daemon=True,
+        ).start()
 
     return transaction_to_dict(tx)
 
@@ -532,6 +579,72 @@ def decline_transaction(
     )
     db.commit()
     return {"message": "Transaction declined."}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Initiator: Send a reminder to the counterparty
+# ══════════════════════════════════════════════════════════════════
+
+@router.post("/{transaction_id}/remind")
+def remind_counterparty(
+    transaction_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Initiator can nudge the counterparty. Rate-limited to once per hour per transaction.
+    - Registered counterparty: creates an in-app notification
+    - Unregistered counterparty: re-sends the invite email
+    """
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    initiator_id = getattr(tx, "initiated_by_user_id", None) or tx.buyer_id
+    if str(current_user.id) != str(initiator_id):
+        raise HTTPException(status_code=403, detail="Only the initiator can send reminders")
+
+    if tx.status not in ("pending_approval", "pending_acceptance"):
+        raise HTTPException(status_code=409, detail="Reminders can only be sent while the invitation is open")
+
+    # Rate limit: 1 reminder per hour
+    last_reminded = getattr(tx, "last_reminded_at", None)
+    if last_reminded and (datetime.utcnow() - last_reminded).total_seconds() < 3600:
+        wait_minutes = int((3600 - (datetime.utcnow() - last_reminded).total_seconds()) / 60) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {wait_minutes} more minute(s) before sending another reminder.",
+        )
+
+    tx.last_reminded_at = datetime.utcnow()
+    db.commit()
+
+    inviter_name = f"{current_user.first_name} {current_user.last_name}".strip()
+
+    if tx.seller_id:
+        # Registered counterparty — in-app notification
+        notify_id = tx.seller_id if str(tx.buyer_id) == str(current_user.id) else tx.buyer_id
+        create_notification(
+            db,
+            notify_id,
+            "Transaction reminder",
+            f"{inviter_name} is reminding you to respond to the transaction: {tx.title}",
+            "transaction",
+            related_item_id=tx.id,
+            related_item_type="transaction",
+        )
+    elif tx.counterparty_email:
+        # Unregistered counterparty — resend invite email
+        import threading
+        threading.Thread(
+            target=_send_transaction_invite_email,
+            args=(tx.counterparty_email, inviter_name, tx.title, tx.id),
+            daemon=True,
+        ).start()
+    else:
+        raise HTTPException(status_code=409, detail="No counterparty linked to this transaction")
+
+    return {"message": "Reminder sent."}
 
 
 # ══════════════════════════════════════════════════════════════════
