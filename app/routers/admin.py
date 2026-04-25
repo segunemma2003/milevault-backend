@@ -1205,6 +1205,7 @@ def _settings_to_dict(s: PlatformSettings) -> dict:
         "auto_release_days": getattr(s, "auto_release_days", 5),
         "invite_expiry_days": getattr(s, "invite_expiry_days", 30),
         "stale_activity_warn_days": getattr(s, "stale_activity_warn_days", 90),
+        "require_email_verification": bool(getattr(s, "require_email_verification", True)),
         "platform_name": s.platform_name,
         "support_email": s.support_email,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
@@ -1237,6 +1238,7 @@ def update_platform_settings(
     auto_release_days: Optional[int] = Body(None),
     invite_expiry_days: Optional[int] = Body(None),
     stale_activity_warn_days: Optional[int] = Body(None),
+    require_email_verification: Optional[bool] = Body(None),
     platform_name: Optional[str] = Body(None),
     support_email: Optional[str] = Body(None),
     db: Session = Depends(get_db),
@@ -1299,6 +1301,7 @@ def update_platform_settings(
         "auto_release_days": auto_release_days,
         "invite_expiry_days": invite_expiry_days,
         "stale_activity_warn_days": stale_activity_warn_days,
+        "require_email_verification": require_email_verification,
         "platform_name": platform_name,
         "support_email": support_email,
     }

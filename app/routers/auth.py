@@ -17,6 +17,7 @@ from app.schemas.auth import (
 from app.schemas.user import UserOut
 from app.models.user import User, UserSettings
 from app.models.wallet import WalletBalance
+from app.models.currency import PlatformSettings
 from app.services.auth_service import (
     hash_password, verify_password,
     create_access_token, create_refresh_token, decode_token
@@ -98,6 +99,13 @@ def _send_verification_email(user: User, raw_token: str) -> None:
         pass
 
 
+def _email_verification_required(db: Session) -> bool:
+    settings_row = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
+    if not settings_row:
+        return True
+    return bool(getattr(settings_row, "require_email_verification", True))
+
+
 def _delete_if_unverified_expired(db: Session, user: User) -> bool:
     if user.is_email_verified:
         return False
@@ -148,6 +156,7 @@ def register(payload: RegisterRequest, response: Response, db: Session = Depends
             detail={"error": "WEAK_PASSWORD", "message": "Password must be at least 8 characters long."},
         )
 
+    require_email_verification = _email_verification_required(db)
     user = User(
         first_name=payload.first_name.strip(),
         last_name=payload.last_name.strip(),
@@ -155,9 +164,9 @@ def register(payload: RegisterRequest, response: Response, db: Session = Depends
         hashed_password=hash_password(payload.password),
         role=payload.role,
         country_code=getattr(payload, "country_code", None),
-        is_email_verified=False,
+        is_email_verified=not require_email_verification,
     )
-    raw_token = _issue_email_verification_token(user)
+    raw_token = _issue_email_verification_token(user) if require_email_verification else None
     db.add(user)
     db.flush()
 
@@ -167,17 +176,35 @@ def register(payload: RegisterRequest, response: Response, db: Session = Depends
 
     db.commit()
     db.refresh(user)
-    _send_verification_email(user, raw_token)
+    if require_email_verification and raw_token:
+        _send_verification_email(user, raw_token)
+        try:
+            from app.services.notification_service import create_notification
+            create_notification(
+                db,
+                user.id,
+                "Verification Email Sent",
+                "We've sent a verification email to your inbox. Verify within 15 minutes to activate your account.",
+                "account",
+            )
+            db.commit()
+        except Exception:
+            pass
     _clear_auth_cookies(response)
     return RegisterResponse(
-        message="Account created. Please verify your email to sign in.",
+        message=(
+            "Account created. Please verify your email to sign in."
+            if require_email_verification
+            else "Account created successfully. You can now sign in."
+        ),
         email=user.email,
-        requires_email_verification=True,
+        requires_email_verification=require_email_verification,
     )
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, response: Response, request: Request, db: Session = Depends(get_db)):
+    require_email_verification = _email_verification_required(db)
     user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
 
     if not user or not verify_password(payload.password, user.hashed_password):
@@ -196,7 +223,7 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
                 "message": "Your account has been deactivated. Please contact support@milevault.com.",
             },
         )
-    if _delete_if_unverified_expired(db, user):
+    if require_email_verification and _delete_if_unverified_expired(db, user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -204,7 +231,7 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
                 "message": "Email was not verified within 15 minutes, so this account was deleted. Please register again.",
             },
         )
-    if not user.is_email_verified:
+    if require_email_verification and not user.is_email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -236,6 +263,8 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
 
 @router.post("/verify-email")
 def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
+    if not _email_verification_required(db):
+        return {"message": "Email verification is currently disabled by admin."}
     hashed = _hash_email_token(payload.token.strip())
     user = db.query(User).filter(User.email_verification_token == hashed).first()
     if not user:
@@ -264,6 +293,8 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
 
 @router.post("/resend-verification")
 def resend_verification(payload: ResendVerificationRequest, db: Session = Depends(get_db)):
+    if not _email_verification_required(db):
+        return {"message": "Email verification is currently disabled by admin."}
     user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
     if not user:
         # Do not leak account existence.
@@ -275,6 +306,18 @@ def resend_verification(payload: ResendVerificationRequest, db: Session = Depend
     raw_token = _issue_email_verification_token(user)
     db.commit()
     _send_verification_email(user, raw_token)
+    try:
+        from app.services.notification_service import create_notification
+        create_notification(
+            db,
+            user.id,
+            "Verification Email Sent",
+            "A new verification email has been sent. Verify within 15 minutes to keep your account active.",
+            "account",
+        )
+        db.commit()
+    except Exception:
+        pass
     return {"message": "Verification email sent. Check your inbox."}
 
 

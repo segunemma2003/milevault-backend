@@ -588,6 +588,11 @@ def cleanup_unverified_accounts(self) -> dict:
     db = SessionLocal()
     try:
         from app.models.user import User
+        from app.models.currency import PlatformSettings
+
+        settings_row = db.query(PlatformSettings).filter(PlatformSettings.id == "default").first()
+        if settings_row and not bool(getattr(settings_row, "require_email_verification", True)):
+            return {"status": "skipped", "reason": "email_verification_disabled", "deleted": 0}
 
         expired = (
             db.query(User)

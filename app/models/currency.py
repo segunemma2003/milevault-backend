@@ -148,6 +148,8 @@ class PlatformSettings(Base):
     invite_expiry_days = Column(Integer, default=30, nullable=False)
     # Notify parties on active/in_progress deals with no updates for N days (one-time per tx)
     stale_activity_warn_days = Column(Integer, default=90, nullable=False)
+    # Admin toggle: when disabled, new users can log in without email verification.
+    require_email_verification = Column(Boolean, default=True, nullable=False)
 
     updated_by = Column(String, ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -41,6 +41,7 @@ ALTER TABLE disputes ADD COLUMN IF NOT EXISTS evidence_urls JSON DEFAULT '[]';
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS high_value_checklist_threshold DOUBLE PRECISION;
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS funding_deadline_days INTEGER NOT NULL DEFAULT 14;
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS auto_release_days INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS require_email_verification BOOLEAN NOT NULL DEFAULT true;
 
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS initiated_by_user_id VARCHAR REFERENCES users(id);
 UPDATE transactions SET initiated_by_user_id = buyer_id WHERE initiated_by_user_id IS NULL AND buyer_id IS NOT NULL;
