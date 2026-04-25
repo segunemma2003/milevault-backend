@@ -6,9 +6,10 @@ Deposit flow:
   2. User completes payment on gateway
   3. POST /wallet/deposit/verify    →  verify + credit wallet
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Header
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime, timedelta
 from app.database import get_db
 from app.schemas.wallet import DepositRequest, WithdrawRequest, ConvertRequest, TransferRequest
 from app.models.wallet import WalletBalance, WalletTransaction
@@ -20,7 +21,7 @@ from app.services.payment_service import (
     initiate_deposit,
     verify_deposit,
     get_gateway_for_country,
-    generate_payment_reference,
+    paystack_verify_webhook,
     PaystackError,
     StripeError,
     FlutterwaveError,
@@ -45,6 +46,86 @@ def get_or_create_balance(db: Session, user_id: str, currency: str) -> WalletBal
         db.add(balance)
         db.flush()
     return balance
+
+
+def _apply_verified_deposit(
+    *,
+    db: Session,
+    user_id: str,
+    gateway: str,
+    reference: str,
+    amount: float,
+    currency: str,
+    wallet_transaction_id: Optional[str] = None,
+) -> tuple[WalletTransaction, WalletBalance]:
+    """
+    Idempotently credit wallet for a verified gateway payment.
+    - Reuses pending tx by wallet_transaction_id, then by reference.
+    - Prevents duplicate credit if tx is already completed.
+    """
+    txn = None
+    if wallet_transaction_id:
+        txn = db.query(WalletTransaction).filter(
+            WalletTransaction.id == wallet_transaction_id,
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "deposit",
+        ).first()
+
+    if not txn:
+        txn = db.query(WalletTransaction).filter(
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "deposit",
+            WalletTransaction.reference == reference,
+        ).order_by(WalletTransaction.created_at.desc()).first()
+
+    if not txn:
+        # Legacy recovery: older rows were created with empty reference.
+        txn = db.query(WalletTransaction).filter(
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "deposit",
+            WalletTransaction.status == "pending",
+            WalletTransaction.method == gateway,
+            WalletTransaction.reference.is_(None) | (WalletTransaction.reference == ""),
+        ).order_by(WalletTransaction.created_at.desc()).first()
+
+    if txn and txn.status == "completed":
+        balance = get_or_create_balance(db, user_id, currency.upper())
+        return txn, balance
+
+    balance = get_or_create_balance(db, user_id, currency.upper())
+    balance.amount += amount
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        cooldown = datetime.utcnow() + timedelta(hours=24)
+        if not user.withdrawal_cooldown_until or user.withdrawal_cooldown_until < cooldown:
+            user.withdrawal_cooldown_until = cooldown
+
+    if txn:
+        txn.status = "completed"
+        txn.amount = amount
+        txn.currency = currency.upper()
+        txn.method = gateway
+        txn.reference = reference
+        if not txn.description:
+            txn.description = f"{gateway.title()} deposit verified"
+    else:
+        txn = WalletTransaction(
+            user_id=user_id,
+            type="deposit",
+            amount=amount,
+            currency=currency.upper(),
+            status="completed",
+            description=f"{gateway.title()} deposit verified",
+            method=gateway,
+            reference=reference,
+        )
+        db.add(txn)
+
+    db.commit()
+    db.refresh(balance)
+    db.refresh(txn)
+    return txn, balance
 
 
 def _get_exchange_rate(db: Session, from_code: str, to_code: str) -> float:
@@ -248,9 +329,8 @@ def initiate_deposit_endpoint(
         status="pending",
         description=f"{result['gateway'].title()} deposit",
         method=result["gateway"],
+        reference=result.get("reference", ""),
     )
-    if hasattr(txn, "gateway_reference"):
-        txn.gateway_reference = result.get("reference", "")
     db.add(txn)
     db.commit()
     db.refresh(txn)
@@ -306,39 +386,16 @@ def verify_deposit_endpoint(
             },
         )
 
-    # Credit wallet
-    if current_user.wallet_frozen:
-        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
-    from datetime import datetime, timedelta
-    balance = get_or_create_balance(db, current_user.id, result["currency"])
-    balance.amount += result["amount"]
-    # Set 24h withdrawal cooldown on new deposit (fraud prevention)
-    cooldown = datetime.utcnow() + timedelta(hours=24)
-    if not current_user.withdrawal_cooldown_until or current_user.withdrawal_cooldown_until < cooldown:
-        current_user.withdrawal_cooldown_until = cooldown
-
-    # Update pending transaction or create a new completed one
-    if wallet_transaction_id:
-        txn = db.query(WalletTransaction).filter(
-            WalletTransaction.id == wallet_transaction_id,
-            WalletTransaction.user_id == current_user.id,
-        ).first()
-        if txn:
-            txn.status = "completed"
-            txn.amount = result["amount"]
-    else:
-        txn = WalletTransaction(
-            user_id=current_user.id,
-            type="deposit",
-            amount=result["amount"],
-            currency=result["currency"],
-            status="completed",
-            description=f"{gateway.title()} deposit verified",
-            method=gateway,
-        )
-        db.add(txn)
-
-    db.commit()
+    # Credit wallet idempotently (reuses pending tx by id/reference)
+    txn, balance = _apply_verified_deposit(
+        db=db,
+        user_id=current_user.id,
+        gateway=gateway,
+        reference=result["reference"],
+        amount=result["amount"],
+        currency=result["currency"],
+        wallet_transaction_id=wallet_transaction_id,
+    )
 
     create_notification(
         db, current_user.id,
@@ -352,7 +409,104 @@ def verify_deposit_endpoint(
         "amount": result["amount"],
         "currency": result["currency"],
         "new_balance": balance.amount,
+        "wallet_transaction_id": str(txn.id),
     }
+
+
+@router.post("/deposit/reconcile")
+def reconcile_deposit_endpoint(
+    gateway: str,
+    reference: str,
+    wallet_transaction_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Manual recovery endpoint: verify gateway payment and reconcile pending wallet tx.
+    Useful when the frontend callback was interrupted.
+    """
+    if current_user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
+
+    try:
+        result = verify_deposit(gateway=gateway, reference=reference, db=db)
+    except (PaystackError, StripeError, FlutterwaveError) as e:
+        raise HTTPException(status_code=502, detail={"error": "GATEWAY_VERIFICATION_FAILED", "message": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"error": "UNKNOWN_GATEWAY", "message": str(e)})
+
+    if not result["success"]:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "PAYMENT_NOT_SUCCESSFUL", "message": f"Gateway status is not successful for reference {reference}."},
+        )
+
+    txn, balance = _apply_verified_deposit(
+        db=db,
+        user_id=current_user.id,
+        gateway=gateway,
+        reference=result["reference"],
+        amount=result["amount"],
+        currency=result["currency"],
+        wallet_transaction_id=wallet_transaction_id,
+    )
+    return {
+        "message": "Deposit reconciled successfully.",
+        "amount": result["amount"],
+        "currency": result["currency"],
+        "new_balance": balance.amount,
+        "wallet_transaction_id": str(txn.id),
+    }
+
+
+@router.post("/webhooks/paystack")
+async def paystack_webhook(
+    request: Request,
+    x_paystack_signature: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Paystack webhook receiver (public endpoint).
+    Handles successful charge events as fallback when frontend verify isn't called.
+    """
+    body = await request.body()
+    if not x_paystack_signature or not paystack_verify_webhook(body, x_paystack_signature):
+        raise HTTPException(status_code=401, detail="Invalid Paystack signature")
+
+    payload = await request.json()
+    event = payload.get("event")
+    data = payload.get("data") or {}
+    if event != "charge.success":
+        return {"ok": True, "ignored": event}
+
+    metadata = data.get("metadata") or {}
+    user_id = metadata.get("user_id")
+    if not user_id:
+        return {"ok": True, "ignored": "missing_user_id_metadata"}
+
+    reference = data.get("reference")
+    if not reference:
+        return {"ok": True, "ignored": "missing_reference"}
+
+    amount_minor = int(data.get("amount") or 0)
+    amount = amount_minor / 100.0
+    currency = (data.get("currency") or "NGN").upper()
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return {"ok": True, "ignored": "unknown_user"}
+    if user.wallet_frozen:
+        return {"ok": True, "ignored": "wallet_frozen"}
+
+    _apply_verified_deposit(
+        db=db,
+        user_id=user_id,
+        gateway="paystack",
+        reference=reference,
+        amount=amount,
+        currency=currency,
+    )
+    return {"ok": True}
 
 
 # ─── Withdrawal ───────────────────────────────────────────────────────────────
