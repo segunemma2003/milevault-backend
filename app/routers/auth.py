@@ -5,8 +5,11 @@ for flexibility (mobile apps / API clients can use the body).
 """
 from datetime import datetime, timedelta
 import hashlib
+import logging
 import secrets
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+
+logger = logging.getLogger("milevault.auth")
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.auth import (
@@ -77,6 +80,32 @@ def _issue_password_reset_token(user: User) -> str:
     return raw
 
 
+def _send_email_direct(to_email: str, subject: str, body_html: str) -> None:
+    """Send via Resend API directly — no Celery worker needed."""
+    if not settings.RESEND_API_KEY:
+        logger.info(f"[DEV EMAIL] To: {to_email} | Subject: {subject}")
+        return
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            json={
+                "from": f"MileVault <{settings.DEFAULT_FROM_EMAIL}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": body_html,
+            },
+            headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
+            timeout=10,
+        )
+        if not resp.is_success:
+            logger.error(f"Resend API error {resp.status_code}: {resp.text} | from={settings.DEFAULT_FROM_EMAIL} to={to_email}")
+        else:
+            logger.info(f"Email sent via Resend: {to_email} | {subject}")
+    except Exception as exc:
+        logger.warning(f"Direct email send failed ({to_email}): {exc}")
+
+
 def _send_verification_email(user: User, raw_token: str) -> None:
     verify_url = f"{settings.FRONTEND_URL}/verify-email?token={raw_token}"
     body_html = (
@@ -87,16 +116,7 @@ def _send_verification_email(user: User, raw_token: str) -> None:
         f"<p>Or copy this link:</p><p>{verify_url}</p>"
         f"<p>This link expires in {EMAIL_VERIFICATION_TTL_MINUTES} minutes.</p>"
     )
-    try:
-        from app.services.tasks import send_notification_email
-        send_notification_email.delay(
-            to_email=user.email,
-            subject="Verify your MileVault email",
-            body_html=body_html,
-        )
-    except Exception:
-        # Non-blocking: account is created even if mail worker is temporarily unavailable.
-        pass
+    _send_email_direct(user.email, "Verify your MileVault email", body_html)
 
 
 def _email_verification_required(db: Session) -> bool:
@@ -127,19 +147,11 @@ def _send_password_reset_email(user: User, raw_token: str) -> None:
         f"<p><a href='{reset_url}' style='display:inline-block;padding:10px 16px;background:#111827;color:#fff;text-decoration:none;border-radius:6px;'>Reset Password</a></p>"
         f"<p>This link expires in 1 hour.</p>"
     )
-    try:
-        from app.services.tasks import send_notification_email
-        send_notification_email.delay(
-            to_email=user.email,
-            subject="Reset your MileVault password",
-            body_html=body_html,
-        )
-    except Exception:
-        pass
+    _send_email_direct(user.email, "Reset your MileVault password", body_html)
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, response: Response, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, response: Response, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(
@@ -177,7 +189,7 @@ def register(payload: RegisterRequest, response: Response, db: Session = Depends
     db.commit()
     db.refresh(user)
     if require_email_verification and raw_token:
-        _send_verification_email(user, raw_token)
+        background_tasks.add_task(_send_verification_email, user, raw_token)
         try:
             from app.services.notification_service import create_notification
             create_notification(
@@ -292,7 +304,7 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/resend-verification")
-def resend_verification(payload: ResendVerificationRequest, db: Session = Depends(get_db)):
+def resend_verification(payload: ResendVerificationRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if not _email_verification_required(db):
         return {"message": "Email verification is currently disabled by admin."}
     user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
@@ -305,7 +317,7 @@ def resend_verification(payload: ResendVerificationRequest, db: Session = Depend
         return {"message": "Email is already verified. Please sign in."}
     raw_token = _issue_email_verification_token(user)
     db.commit()
-    _send_verification_email(user, raw_token)
+    background_tasks.add_task(_send_verification_email, user, raw_token)
     try:
         from app.services.notification_service import create_notification
         create_notification(
@@ -322,12 +334,12 @@ def resend_verification(payload: ResendVerificationRequest, db: Session = Depend
 
 
 @router.post("/forgot-password")
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
     if user and user.is_active:
         raw = _issue_password_reset_token(user)
         db.commit()
-        _send_password_reset_email(user, raw)
+        background_tasks.add_task(_send_password_reset_email, user, raw)
     return {"message": "If an account exists for this email, a reset link has been sent."}
 
 
