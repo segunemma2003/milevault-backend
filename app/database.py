@@ -1,4 +1,6 @@
-from sqlalchemy import create_engine
+from pathlib import Path
+
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
@@ -24,7 +26,27 @@ def get_db():
         db.close()
 
 
+def _incremental_schema_statements() -> list[str]:
+    """Parse scripts/schema_updates_milevault_2026_04.sql into executable statements."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "schema_updates_milevault_2026_04.sql"
+    if not path.is_file():
+        return []
+    raw = path.read_text()
+    lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("--")]
+    clean = "\n".join(lines)
+    return [s.strip() for s in clean.split(";") if s.strip()]
+
+
 def create_tables():
     from app.models import user, transaction, wallet, dispute, message, kyc, notification  # noqa
     from app.models import agent, currency  # noqa
     Base.metadata.create_all(bind=engine)
+    # create_all does not add new columns to existing tables — apply idempotent ALTERs
+    # against the same DATABASE_URL the app uses (fixes Railway drift vs CLI migrations).
+    if engine.dialect.name != "postgresql":
+        return
+    stmts = _incremental_schema_statements()
+    if stmts:
+        with engine.begin() as conn:
+            for stmt in stmts:
+                conn.execute(text(stmt))

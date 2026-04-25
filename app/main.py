@@ -106,12 +106,9 @@ def _seed_default_currencies() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        create_tables()
-        logger.info("MileVault API started — tables verified.")
-    except Exception as exc:
-        import traceback
-        logger.error(f"DB table creation failed (degraded mode): {exc}\n{traceback.format_exc()}")
+    # Must succeed: otherwise ORM queries hit missing columns while the API still runs.
+    create_tables()
+    logger.info("MileVault API started — tables and incremental schema verified.")
 
     _seed_admin()
     _seed_default_currencies()

@@ -19,6 +19,14 @@ ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_version_notes TEXT;
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS invalid_delivery_reported BOOLEAN DEFAULT false;
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS invalid_delivery_report_note TEXT;
 ALTER TABLE milestones ADD COLUMN IF NOT EXISTS milestone_action_logs JSON DEFAULT '[]';
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS funded_amount DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS is_funded BOOLEAN DEFAULT false;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS funding_deadline TIMESTAMP;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS auto_release_at TIMESTAMP;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_note TEXT;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS delivery_attachments JSON DEFAULT '[]';
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS revision_note TEXT;
 
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES milestones(id) ON DELETE SET NULL;
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS evidence_urls JSON DEFAULT '[]';
@@ -29,8 +37,17 @@ ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS auto_release_days INTEGER
 
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS initiated_by_user_id VARCHAR REFERENCES users(id);
 UPDATE transactions SET initiated_by_user_id = buyer_id WHERE initiated_by_user_id IS NULL AND buyer_id IS NOT NULL;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS funding_deadline TIMESTAMP;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS funded_milestones INTEGER DEFAULT 0;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS locked_exchange_rate DOUBLE PRECISION;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS locked_rate_from VARCHAR(10);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS locked_rate_to VARCHAR(10);
+
+ALTER TABLE wallet_balances ADD COLUMN IF NOT EXISTS escrow_amount DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE wallet_balances ADD COLUMN IF NOT EXISTS pending_amount DOUBLE PRECISION DEFAULT 0.0;
 
 ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS flagged_high_risk BOOLEAN DEFAULT false;
+ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES milestones(id) ON DELETE SET NULL;
 
 ALTER TABLE refunds ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES milestones(id) ON DELETE SET NULL;
 
