@@ -729,7 +729,7 @@ def deactivate_user(
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
 
     user.is_active = False
-    _notify(db, user_id, "Account Deactivated", f"Your account has been deactivated. Reason: {reason}. Contact support@milevault.com.")
+    _notify(db, user_id, "Account Deactivated", f"Your account has been deactivated. Reason: {reason}. Contact support@bondrova.com.")
     db.commit()
     return {"message": f"User '{user.email}' deactivated."}
 
@@ -745,7 +745,7 @@ def freeze_wallet(
     if not user:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
     user.wallet_frozen = True
-    _notify(db, user_id, "Wallet Frozen", f"Your wallet has been frozen by platform security. Reason: {reason}. Contact support@milevault.com.")
+    _notify(db, user_id, "Wallet Frozen", f"Your wallet has been frozen by platform security. Reason: {reason}. Contact support@bondrova.com.")
     db.commit()
     return {"message": f"Wallet frozen for {user.email}."}
 

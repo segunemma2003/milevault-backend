@@ -30,16 +30,16 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: str, tx_id: str) -> None:
     """Email an unregistered counterparty inviting them to register and accept the transaction."""
+    from app.services.email_template import button, render_email, sender as email_sender
     register_url = f"{settings.FRONTEND_URL}/register"
     body_html = (
-        f"<h2>You've been invited to a transaction on MileVault</h2>"
+        f"<h2>You've been invited to a transaction on Bondrova</h2>"
         f"<p>Hi there,</p>"
         f"<p><strong>{inviter_name}</strong> has invited you to participate in an escrow transaction: "
         f"<strong>{tx_title}</strong>.</p>"
-        f"<p>MileVault is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
+        f"<p>Bondrova is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
         f"<p>To accept this invitation, create your free account:</p>"
-        f"<p><a href='{register_url}' style='display:inline-block;padding:10px 16px;background:#111827;color:#fff;"
-        f"text-decoration:none;border-radius:6px;'>Create Account &amp; Accept</a></p>"
+        f"<p>{button(register_url, 'Create Account &amp; Accept')}</p>"
         f"<p>Once registered with this email address, the transaction will automatically appear in your dashboard.</p>"
         f"<p>If you did not expect this invitation, you can safely ignore this email.</p>"
     )
@@ -50,7 +50,7 @@ def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: s
         import httpx
         resp = httpx.post(
             "https://api.resend.com/emails",
-            json={"from": f"MileVault <{settings.DEFAULT_FROM_EMAIL}>", "to": [to_email], "subject": f"You've been invited to '{tx_title}' on MileVault", "html": body_html},
+            json={"from": email_sender(), "to": [to_email], "subject": f"You've been invited to '{tx_title}' on Bondrova", "html": render_email(body_html)},
             headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
             timeout=10,
         )
@@ -195,7 +195,7 @@ def create_transaction(
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": "When you initiate as the seller, the counterparty must be a registered MileVault user (the buyer who will fund the work).",
+                    "message": "When you initiate as the seller, the counterparty must be a registered Bondrova user (the buyer who will fund the work).",
                 },
             )
         buyer_id = counterparty.id

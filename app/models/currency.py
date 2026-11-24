@@ -133,8 +133,8 @@ class PlatformSettings(Base):
 
     max_transaction_amount = Column(Float, nullable=True)
     min_transaction_amount = Column(Float, default=1.0)
-    platform_name = Column(String(100), default="MileVault")
-    support_email = Column(String(255), default="support@milevault.com")
+    platform_name = Column(String(100), default="Bondrova")
+    support_email = Column(String(255), default="support@bondrova.com")
 
     # When milestone amount >= this (same currency as milestone or tx), buyer must confirm checklist on approve
     high_value_checklist_threshold = Column(Float, nullable=True)

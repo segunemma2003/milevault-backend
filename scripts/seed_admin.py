@@ -49,7 +49,7 @@ def seed() -> None:
             return
 
         admin = User(
-            first_name="MileVault",
+            first_name="Bondrova",
             last_name="Admin",
             email=ADMIN_EMAIL,
             hashed_password=pwd_context.hash(ADMIN_PASSWORD),

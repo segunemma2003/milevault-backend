@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     # Transactional email (Resend)
     RESEND_API_KEY: str = ""
-    DEFAULT_FROM_EMAIL: str = "noreply@milevault.com"
+    DEFAULT_FROM_EMAIL: str = "noreply@bondrova.com"
 
     # Frontend
     FRONTEND_URL: str = "http://localhost:5173"
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_UPLOAD: str = "20/minute"
 
     # Watermarking
-    WATERMARK_TEXT: str = "MileVault"
+    WATERMARK_TEXT: str = "Bondrova"
 
     # Milestones / funding deadline (days after seller accepts before auto-cancel rules apply)
     FUNDING_DEADLINE_DAYS: int = 14

@@ -127,12 +127,13 @@ def send_notification_email(self, to_email: str, subject: str, body_html: str) -
             return {"status": "dev_logged"}
 
         import resend
+        from app.services.email_template import render_email, sender as email_sender
         resend.api_key = settings.RESEND_API_KEY
         resend.Emails.send({
-            "from": f"MileVault <{settings.DEFAULT_FROM_EMAIL}>",
+            "from": email_sender(),
             "to": [to_email],
             "subject": subject,
-            "html": body_html,
+            "html": render_email(body_html),
         })
         return {"status": "sent", "to": to_email}
     except Exception as exc:

@@ -583,9 +583,9 @@ def withdraw(
     """
     # Risk & fraud controls
     if current_user.wallet_frozen:
-        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support@milevault.com."})
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support@bondrova.com."})
     if current_user.withdrawals_blocked:
-        raise HTTPException(status_code=403, detail={"error": "WITHDRAWALS_BLOCKED", "message": "Withdrawals are currently blocked on your account. Contact support@milevault.com."})
+        raise HTTPException(status_code=403, detail={"error": "WITHDRAWALS_BLOCKED", "message": "Withdrawals are currently blocked on your account. Contact support@bondrova.com."})
     if not current_user.is_kyc_verified:
         raise HTTPException(status_code=403, detail={"error": "KYC_REQUIRED", "message": "Identity verification (KYC) is required before withdrawing funds."})
     from datetime import datetime
@@ -684,7 +684,7 @@ def transfer_funds(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send funds from your wallet to another MileVault user by email."""
+    """Send funds from your wallet to another Bondrova user by email."""
     if payload.amount <= 0:
         raise HTTPException(
             status_code=422,
@@ -706,7 +706,7 @@ def transfer_funds(
     if not recipient:
         raise HTTPException(
             status_code=404,
-            detail={"error": "RECIPIENT_NOT_FOUND", "message": "No active MileVault account found with that email address."},
+            detail={"error": "RECIPIENT_NOT_FOUND", "message": "No active Bondrova account found with that email address."},
         )
 
     sender_balance = get_or_create_balance(db, current_user.id, currency_upper)
@@ -881,7 +881,7 @@ def platform_info(db: Session = Depends(get_db)):
         "custody_notice": (
             "Customer funds for escrow are segregated in ledger accounts (buyer available / buyer escrow / seller available). "
             "Deposits and payouts are processed through configured payment gateways (e.g. Paystack where enabled). "
-            "MileVault does not lend customer balances and does not use customer wallet funds for operational expenses."
+            "Bondrova does not lend customer balances and does not use customer wallet funds for operational expenses."
         ),
         "payment_gateway_note": (
             "Card and bank funding may be processed by third-party gateways such as Paystack depending on region and currency. "

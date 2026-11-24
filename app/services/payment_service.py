@@ -364,7 +364,7 @@ def flutterwave_initiate_deposit(
         },
         "meta": metadata or {},
         "customizations": {
-            "title": "MileVault",
+            "title": "Bondrova",
             "description": "Secure escrow deposit",
         },
     }

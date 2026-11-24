@@ -1,5 +1,5 @@
 """
-MileVault FastAPI application entry point.
+Bondrova FastAPI application entry point.
 Middleware stack (outermost → innermost):
   CORSMiddleware → SecurityMiddleware → RateLimiterMiddleware → IdempotencyMiddleware → Router
 """
@@ -55,7 +55,7 @@ def _seed_admin() -> None:
             import uuid
             admin = User(
                 id=str(uuid.uuid4()),
-                first_name="MileVault",
+                first_name="Bondrova",
                 last_name="Admin",
                 email=settings.ADMIN_EMAIL,
                 hashed_password=pwd_context.hash(settings.ADMIN_PASSWORD),
@@ -109,7 +109,7 @@ def _seed_default_currencies() -> None:
 async def lifespan(app: FastAPI):
     # Must succeed: otherwise ORM queries hit missing columns while the API still runs.
     create_tables()
-    logger.info("MileVault API started — tables and incremental schema verified.")
+    logger.info("Bondrova API started — tables and incremental schema verified.")
 
     _seed_admin()
     _seed_default_currencies()
@@ -123,11 +123,11 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Redis subscriber not started (Redis unavailable?): {exc}")
 
     yield
-    logger.info("MileVault API shutting down.")
+    logger.info("Bondrova API shutting down.")
 
 
 app = FastAPI(
-    title="MileVault API",
+    title="Bondrova API",
     description="Secure escrow platform — presigned S3 uploads, WebSocket chat, multi-gateway payments.",
     version="2.0.0",
     lifespan=lifespan,
@@ -322,7 +322,7 @@ async def notifications_ws(
 @app.get("/", tags=["Health"])
 def root():
     return {
-        "message": "MileVault API v2.0",
+        "message": "Bondrova API v2.0",
         "docs": "/docs",
         "status": "running",
     }
