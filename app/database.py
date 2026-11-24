@@ -70,3 +70,58 @@ def create_tables():
     from app.schema_sync import apply_missing_columns_from_metadata
 
     apply_missing_columns_from_metadata(engine, Base, log=_schema_log)
+
+    _apply_money_precision()
+
+
+# Money columns stored as exact NUMERIC(28,8) (8 dp covers satoshi; NGN/USD are quantised
+# to 2 dp and USDT/USDC to 6 dp by app/services/ledger.py). The ORM type stays Float so
+# existing call sites keep working; values round-trip exactly at this scale.
+_MONEY_COLUMNS = [
+    ("wallet_balances", "amount"),
+    ("wallet_balances", "escrow_amount"),
+    ("wallet_balances", "pending_amount"),
+    ("wallet_transactions", "amount"),
+    ("ledger_entries", "amount"),
+    ("transactions", "amount"),
+    ("milestones", "amount"),
+    ("milestones", "funded_amount"),
+    ("crypto_pending_deposits", "amount_crypto"),
+    ("crypto_pending_deposits", "fiat_amount"),
+]
+
+
+def _apply_money_precision() -> None:
+    """Idempotent: converts double-precision money columns to NUMERIC(28,8). Never blocks startup."""
+    if engine.dialect.name != "postgresql":
+        return
+    if not settings.MONEY_PRECISION_MIGRATION:
+        _schema_log.warning("Money precision migration is OFF (set MONEY_PRECISION_MIGRATION=true after a DB backup).")
+    for table, column in (_MONEY_COLUMNS if settings.MONEY_PRECISION_MIGRATION else []):
+        try:
+            with engine.begin() as conn:
+                dtype = conn.execute(
+                    text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_name = :t AND column_name = :c"
+                    ),
+                    {"t": table, "c": column},
+                ).scalar()
+                if dtype == "double precision":
+                    conn.execute(text(
+                        f'ALTER TABLE "{table}" ALTER COLUMN "{column}" '
+                        f'TYPE NUMERIC(28,8) USING ROUND("{column}"::numeric, 8)'
+                    ))
+                    _schema_log.warning("Money precision: %s.%s converted to NUMERIC(28,8)", table, column)
+        except Exception as exc:
+            _schema_log.warning("Money precision: could not convert %s.%s: %s", table, column, exc)
+
+    # One balance row per (user, currency). Skipped (with a warning) if duplicates exist.
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_balances_user_currency "
+                "ON wallet_balances (user_id, currency)"
+            ))
+    except Exception as exc:
+        _schema_log.warning("Could not create unique index on wallet_balances(user_id, currency): %s", exc)

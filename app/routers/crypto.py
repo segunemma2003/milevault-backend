@@ -30,6 +30,8 @@ from app.models.user import User
 from app.models.crypto import CryptoDepositAddress, CryptoPendingDeposit, UserCryptoAddress, NETWORK_LABELS, NETWORK_CURRENCIES
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.services.notification_service import create_notification
+from app.services import ledger
+from app.services.ledger import InsufficientFunds
 
 router = APIRouter(prefix="/crypto", tags=["Crypto"])
 admin_router = APIRouter(prefix="/admin/crypto", tags=["Admin Crypto"])
@@ -325,16 +327,16 @@ def admin_approve_deposit(
         raise HTTPException(status_code=404, detail="User not found.")
 
     currency = fiat_currency.upper()
-    balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == user_id,
-        WalletBalance.currency == currency,
-    ).first()
-    if not balance:
-        balance = WalletBalance(user_id=user_id, currency=currency, amount=0.0)
-        db.add(balance)
-        db.flush()
-
-    balance.amount = round(balance.amount + fiat_amount, 2)
+    # Exactly once per on-chain transaction (two admins clicking approve can't double-credit).
+    credited = ledger.credit(
+        db, user_id=user_id, currency=currency, amount=fiat_amount, to_bucket="available",
+        reference_type="crypto_deposit", reference_id=deposit.id,
+        description=f"{deposit.amount_crypto} {deposit.currency} deposit approved",
+        idempotency_key=f"{deposit.network}:{deposit.tx_hash}", external_account="platform",
+    )
+    if not credited:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This on-chain transaction has already been credited.")
 
     db.add(WalletTransaction(
         user_id=user_id,
@@ -346,16 +348,6 @@ def admin_approve_deposit(
         method=f"crypto_{deposit.network}",
     ))
 
-    db.add(LedgerEntry(
-        credit_user_id=user_id,
-        debit_account="platform",
-        credit_account="available",
-        amount=fiat_amount,
-        currency=currency,
-        reference_type="crypto_deposit",
-        reference_id=deposit.id,
-        description=f"{deposit.amount_crypto} {deposit.currency} deposit approved",
-    ))
 
     deposit.user_id = user_id
     deposit.status = "approved"
@@ -459,20 +451,26 @@ def admin_approve_crypto_withdrawal(
     admin: User = Depends(get_current_admin),
 ):
     """Mark withdrawal as processed. Funds were sent manually to user's crypto address."""
+    # Row lock: approve and reject on the same withdrawal serialise; the loser sees it's no longer pending.
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
         WalletTransaction.type == "withdrawal",
         WalletTransaction.status == "pending",
-    ).first()
+    ).with_for_update().first()
     if not txn:
         raise HTTPException(status_code=404, detail="Withdrawal request not found or already processed.")
 
-    user_balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == txn.user_id,
-        WalletBalance.currency == txn.currency,
-    ).first()
-    if user_balance:
-        user_balance.pending_amount = max(0, round((user_balance.pending_amount or 0) - txn.amount, 2))
+    # Money leaves the platform: pending → out. Exact (no 2-dp rounding of crypto amounts).
+    try:
+        ledger.debit(
+            db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount, from_bucket="pending",
+            reference_type="withdrawal_paid", reference_id=str(txn.id),
+            description=f"Crypto withdrawal paid{(' — TX ' + body.tx_hash) if body.tx_hash else ''}",
+            idempotency_key=str(txn.id),
+        )
+    except InsufficientFunds:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Pending balance doesn't cover this withdrawal — check the ledger before paying.")
 
     txn.status = "completed"
     extra = []
@@ -500,21 +498,26 @@ def admin_reject_crypto_withdrawal(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
+    # Row lock: approve and reject on the same withdrawal serialise; the loser sees it's no longer pending.
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
         WalletTransaction.type == "withdrawal",
         WalletTransaction.status == "pending",
-    ).first()
+    ).with_for_update().first()
     if not txn:
         raise HTTPException(status_code=404, detail="Withdrawal request not found or already processed.")
 
-    user_balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == txn.user_id,
-        WalletBalance.currency == txn.currency,
-    ).first()
-    if user_balance:
-        user_balance.amount = round(user_balance.amount + txn.amount, 2)
-        user_balance.pending_amount = max(0, round((user_balance.pending_amount or 0) - txn.amount, 2))
+    try:
+        ledger.move(
+            db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount,
+            from_bucket="pending", to_bucket="available",
+            reference_type="withdrawal_reversal", reference_id=str(txn.id),
+            description=f"Crypto withdrawal rejected: {reason[:100]}",
+            idempotency_key=str(txn.id),
+        )
+    except InsufficientFunds:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Pending balance doesn't cover this withdrawal — check the ledger.")
 
     txn.status = "failed"
     create_notification(
@@ -523,15 +526,5 @@ def admin_reject_crypto_withdrawal(
         f"Your withdrawal of {txn.currency} {txn.amount:,.2f} was rejected. Funds returned. Reason: {reason}",
         "payment",
     )
-    db.add(LedgerEntry(
-        credit_user_id=txn.user_id,
-        debit_account="pending",
-        credit_account="available",
-        amount=txn.amount,
-        currency=txn.currency,
-        reference_type="withdrawal_reversal",
-        reference_id=str(txn.id),
-        description=f"Crypto withdrawal rejected: {reason[:100]}",
-    ))
     db.commit()
     return {"message": "Withdrawal rejected and funds returned to user."}

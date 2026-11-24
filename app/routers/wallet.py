@@ -18,6 +18,8 @@ from app.models.currency import Currency, ExchangeRate
 from app.models.user import User
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
+from app.services import ledger
+from app.services.ledger import InsufficientFunds
 from app.services.payment_service import (
     initiate_deposit,
     verify_deposit,
@@ -93,8 +95,28 @@ def _apply_verified_deposit(
         balance = get_or_create_balance(db, user_id, currency.upper())
         return txn, balance
 
+    # Exactly-once credit: the (gateway, reference) claim and the balance change commit
+    # together, so the webhook and the user's /deposit/verify racing each other can't
+    # both credit. The loser gets False and simply returns the already-completed state.
+    credited = ledger.credit(
+        db,
+        user_id=user_id,
+        currency=currency.upper(),
+        amount=amount,
+        reference_type=f"deposit:{gateway}",
+        reference_id=reference,
+        description=f"{gateway.title()} deposit {reference}",
+        idempotency_key=reference,
+    )
     balance = get_or_create_balance(db, user_id, currency.upper())
-    balance.amount += amount
+    if not credited:
+        db.rollback()
+        done = db.query(WalletTransaction).filter(
+            WalletTransaction.user_id == user_id,
+            WalletTransaction.type == "deposit",
+            WalletTransaction.reference == reference,
+        ).order_by(WalletTransaction.created_at.desc()).first()
+        return (done or txn), get_or_create_balance(db, user_id, currency.upper())
 
     user = db.query(User).filter(User.id == user_id).first()
     if user:
@@ -624,23 +646,6 @@ def withdraw(
         )
 
     currency_upper = payload.currency.upper()
-    balance = get_or_create_balance(db, current_user.id, currency_upper)
-
-    if balance.amount < payload.amount:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "INSUFFICIENT_BALANCE",
-                "message": (
-                    f"Your {currency_upper} balance ({balance.amount:.2f}) is insufficient for this withdrawal. "
-                    f"Requested: {payload.amount:.2f}."
-                ),
-            },
-        )
-
-    balance.amount -= payload.amount
-    balance.pending_amount = (balance.pending_amount or 0) + payload.amount
-
     if payload.amount >= 5000:
         current_user.risk_score = min(100.0, float(current_user.risk_score or 0) + 1.0)
 
@@ -658,6 +663,30 @@ def withdraw(
         flagged_high_risk=withdrawal_flagged_high_risk(current_user, float(payload.amount)),
     )
     db.add(txn)
+    db.flush()
+    # Locked, exact move available → pending. Two simultaneous requests serialise on the
+    # balance row lock, so they can't both spend the same funds.
+    try:
+        ledger.move(
+            db, user_id=current_user.id, currency=currency_upper, amount=payload.amount,
+            from_bucket="available", to_bucket="pending",
+            reference_type="withdrawal_request", reference_id=str(txn.id),
+            description=f"Withdrawal requested via {payload.method}",
+            idempotency_key=str(txn.id),
+        )
+    except InsufficientFunds as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "INSUFFICIENT_BALANCE",
+                "message": (
+                    f"Your {currency_upper} balance ({float(e.have):.2f}) is insufficient for this withdrawal. "
+                    f"Requested: {payload.amount:.2f}."
+                ),
+            },
+        )
+    txn.amount = float(ledger.quantize(payload.amount, currency_upper, db))
     db.commit()
 
     create_notification(
@@ -709,22 +738,30 @@ def transfer_funds(
             detail={"error": "RECIPIENT_NOT_FOUND", "message": "No active Bondrova account found with that email address."},
         )
 
-    sender_balance = get_or_create_balance(db, current_user.id, currency_upper)
-    if sender_balance.amount < payload.amount:
+    if current_user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support@bondrova.com."})
+
+    import uuid as _uuid
+    transfer_ref = f"TRF-{_uuid.uuid4().hex[:16].upper()}"
+
+    # Locked, exact sender → recipient move (both rows locked in a fixed order).
+    try:
+        ledger.transfer(
+            db, currency=currency_upper, amount=payload.amount,
+            from_user_id=current_user.id, from_bucket="available",
+            to_user_id=recipient.id, to_bucket="available",
+            reference_type="transfer", reference_id=transfer_ref,
+            description=f"Transfer to {recipient.email}",
+        )
+    except InsufficientFunds as e:
+        db.rollback()
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "INSUFFICIENT_BALANCE",
-                "message": f"Your {currency_upper} balance ({sender_balance.amount:.2f}) is insufficient for this transfer.",
+                "message": f"Your {currency_upper} balance ({float(e.have):.2f}) is insufficient for this transfer.",
             },
         )
-
-    # Debit sender
-    sender_balance.amount -= payload.amount
-
-    # Credit recipient
-    recipient_balance = get_or_create_balance(db, recipient.id, currency_upper)
-    recipient_balance.amount += payload.amount
 
     note_text = f" — {payload.note}" if payload.note else ""
 
@@ -736,6 +773,7 @@ def transfer_funds(
         status="completed",
         description=f"Transfer to {recipient.email}{note_text}",
         method="internal",
+        reference=transfer_ref,
     )
     recipient_txn = WalletTransaction(
         user_id=recipient.id,
@@ -745,6 +783,7 @@ def transfer_funds(
         status="completed",
         description=f"Transfer from {current_user.email}{note_text}",
         method="internal",
+        reference=transfer_ref,
     )
     db.add(sender_txn)
     db.add(recipient_txn)
@@ -768,7 +807,7 @@ def transfer_funds(
         "amount": payload.amount,
         "currency": currency_upper,
         "recipient": recipient.email,
-        "sender_new_balance": sender_balance.amount,
+        "sender_new_balance": get_or_create_balance(db, current_user.id, currency_upper).amount,
     }
 
 
@@ -795,25 +834,36 @@ def convert_currency(
             detail={"error": "INVALID_AMOUNT", "message": "Conversion amount must be greater than zero."},
         )
 
-    from_balance = get_or_create_balance(db, current_user.id, from_code)
-    if from_balance.amount < payload.amount:
+    rate = _get_exchange_rate(db, from_code, to_code)
+    converted = float(ledger.quantize(ledger.to_decimal(payload.amount) * ledger.to_decimal(rate), to_code, db))
+    if converted <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_AMOUNT", "message": f"Amount is too small to convert to {to_code}."},
+        )
+
+    # Exact, locked: debit the source currency and credit the target currency in one transaction.
+    try:
+        ledger.debit(
+            db, user_id=current_user.id, currency=from_code, amount=payload.amount, from_bucket="available",
+            reference_type="fx_convert", description=f"Convert {from_code} → {to_code} @ {rate}",
+        )
+        ledger.credit(
+            db, user_id=current_user.id, currency=to_code, amount=converted, to_bucket="available",
+            reference_type="fx_convert", description=f"Convert {from_code} → {to_code} @ {rate}",
+        )
+    except InsufficientFunds as e:
+        db.rollback()
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "INSUFFICIENT_BALANCE",
                 "message": (
-                    f"Your {from_code} balance ({from_balance.amount:.2f}) is insufficient. "
+                    f"Your {from_code} balance ({float(e.have):.2f}) is insufficient. "
                     f"Requested: {payload.amount:.2f}."
                 ),
             },
         )
-
-    rate = _get_exchange_rate(db, from_code, to_code)
-    converted = round(payload.amount * rate, 8)
-
-    from_balance.amount -= payload.amount
-    to_balance = get_or_create_balance(db, current_user.id, to_code)
-    to_balance.amount += converted
 
     txn = WalletTransaction(
         user_id=current_user.id,

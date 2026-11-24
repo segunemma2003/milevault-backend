@@ -21,6 +21,8 @@ from app.models.user import User
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
+from app.services import ledger
+from app.services.ledger import InsufficientFunds
 from app.config import settings
 import logging
 logger = logging.getLogger("milevault.transactions")
@@ -680,9 +682,11 @@ def fund_milestone(
     if tx.status not in ("funding_in_progress", "partially_funded", "active", "approved"):
         raise HTTPException(status_code=409, detail=f"Cannot fund milestones in transaction status '{tx.status}'")
 
+    # Lock the milestone row: concurrent fund requests for the same milestone serialise here,
+    # so each one sees the other's funded_amount (no lost update / double charge).
     milestone = db.query(Milestone).filter(
         Milestone.id == milestone_id, Milestone.transaction_id == transaction_id
-    ).first()
+    ).with_for_update().first()
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
     if milestone.is_funded:
@@ -700,22 +704,23 @@ def fund_milestone(
     if pay <= 0:
         raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Funding amount must be greater than zero."})
 
-    balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == current_user.id,
-        WalletBalance.currency == currency,
-    ).first()
-    if not balance or balance.amount < pay:
-        available = balance.amount if balance else 0.0
+    pay = float(ledger.quantize(pay, currency, db))
+    try:
+        ledger.move(
+            db, user_id=current_user.id, currency=currency, amount=pay,
+            from_bucket="available", to_bucket="escrow",
+            reference_type="milestone_fund", reference_id=milestone_id,
+            description=f"Escrow lock for milestone '{milestone.title}'",
+        )
+    except InsufficientFunds as e:
+        db.rollback()
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "INSUFFICIENT_FUNDS",
-                "message": f"Insufficient balance. You have {currency} {available:.2f}, need {currency} {pay:.2f}. Please deposit funds first.",
+                "message": f"Insufficient balance. You have {currency} {float(e.have):.2f}, need {currency} {pay:.2f}. Please deposit funds first.",
             },
         )
-
-    balance.amount = round(balance.amount - pay, 8)
-    balance.escrow_amount = round((balance.escrow_amount or 0) + pay, 8)
 
     new_funded = round(already + pay, 8)
     milestone.funded_amount = new_funded
@@ -729,19 +734,6 @@ def fund_milestone(
         milestone.is_funded = False
         milestone.status = "pending"
 
-    db.add(
-        LedgerEntry(
-            debit_user_id=current_user.id,
-            credit_user_id=current_user.id,
-            debit_account="available",
-            credit_account="escrow",
-            amount=pay,
-            currency=currency,
-            reference_type="milestone_fund",
-            reference_id=milestone_id,
-            description=f"Escrow lock for milestone '{milestone.title}'",
-        )
-    )
     db.add(
         WalletTransaction(
             user_id=current_user.id,
@@ -952,46 +944,45 @@ def approve_milestone(
         "approved",
         {"checklist": body.checklist.model_dump() if body.checklist else None},
     )
-    _release_milestone_escrow(db, tx, milestone, body.feedback)
+    try:
+        _release_milestone_escrow(db, tx, milestone, body.feedback)
+    except InsufficientFunds:
+        db.rollback()
+        logger.error("Escrow shortfall releasing milestone %s of tx %s", milestone_id, transaction_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "ESCROW_MISMATCH",
+                "message": "The escrow balance for this milestone doesn't match. Our team has been alerted — please contact support.",
+            },
+        )
     db.commit()
     return {"message": "Milestone approved. Funds released to seller.", "amount": milestone.amount}
 
 
 def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone, feedback: str = None):
     """Internal helper: release milestone escrow to seller. Called by approve and auto-release."""
+    # Re-read the milestone under a row lock so two releases (approve + auto-release, or a
+    # double click) can't both run; the one-time key below makes any repeat a no-op.
+    milestone = db.query(Milestone).filter(Milestone.id == milestone.id).with_for_update().one()
+    if milestone.status == "completed":
+        return False
+
     currency = milestone.currency or tx.currency
     amount = milestone.funded_amount or milestone.amount
 
-    # Deduct from buyer escrow
-    buyer_balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == tx.buyer_id,
-        WalletBalance.currency == currency,
-    ).first()
-    if buyer_balance:
-        buyer_balance.escrow_amount = max(0, round((buyer_balance.escrow_amount or 0) - amount, 8))
-
-    # Credit seller available
-    seller_balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == tx.seller_id,
-        WalletBalance.currency == currency,
-    ).first()
-    if not seller_balance:
-        seller_balance = WalletBalance(user_id=tx.seller_id, currency=currency, amount=0.0)
-        db.add(seller_balance)
-    seller_balance.amount = round(seller_balance.amount + amount, 8)
-
-    # Ledger: buyer escrow → seller available
-    db.add(LedgerEntry(
-        debit_user_id=tx.buyer_id,
-        credit_user_id=tx.seller_id,
-        debit_account="escrow",
-        credit_account="available",
-        amount=amount,
-        currency=currency,
-        reference_type="milestone_release",
-        reference_id=milestone.id,
+    # Buyer escrow → seller available. Raises InsufficientFunds if the buyer's escrow can't
+    # cover it (previously this silently clamped escrow to 0 and paid the seller anyway).
+    released = ledger.transfer(
+        db, currency=currency, amount=amount,
+        from_user_id=tx.buyer_id, from_bucket="escrow",
+        to_user_id=tx.seller_id, to_bucket="available",
+        reference_type="milestone_release", reference_id=milestone.id,
         description=f"Release for milestone '{milestone.title}'",
-    ))
+        idempotency_key=milestone.id,
+    )
+    if not released:
+        return False
 
     # Wallet transaction audit
     db.add(WalletTransaction(

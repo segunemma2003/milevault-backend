@@ -658,16 +658,16 @@ def create_refund(
     db.add(refund)
     db.flush()
 
-    # Queue Celery task to process the actual fund movement
-    from app.services.tasks import process_refund
-    process_refund.delay(str(refund.id))
-
     _notify(
         db, refund_to_user_id,
         "Refund Initiated",
         f"A refund of {currency.upper()} {amount:,.2f} has been initiated for your transaction. Funds will appear in your wallet shortly.",
     )
     db.commit()
+
+    # Queue only AFTER commit — otherwise the worker can run before the refund row exists.
+    from app.services.tasks import process_refund
+    process_refund.delay(str(refund.id))
     return {"message": "Refund created and queued for processing.", "refund_id": str(refund.id)}
 
 
@@ -808,36 +808,48 @@ def reverse_transfer(
         WalletTransaction.id == wallet_txn_id,
         WalletTransaction.type == "transfer_out",
         WalletTransaction.status == "completed",
-    ).first()
+    ).with_for_update().first()
     if not out_txn:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Completed transfer_out not found."})
+    if not out_txn.reference:
+        raise HTTPException(status_code=409, detail={
+            "error": "UNLINKED_TRANSFER",
+            "message": "This transfer has no reference linking it to the recipient, so it can't be reversed automatically. Adjust manually.",
+        })
 
-    # Find matching transfer_in by reference
     in_txn = db.query(WalletTransaction).filter(
         WalletTransaction.reference == out_txn.reference,
         WalletTransaction.type == "transfer_in",
         WalletTransaction.status == "completed",
-    ).first()
+    ).with_for_update().first()
+    if not in_txn:
+        raise HTTPException(status_code=409, detail={
+            "error": "RECIPIENT_LEG_MISSING",
+            "message": "The matching incoming transfer wasn't found, so nothing was reversed.",
+        })
 
-    # Reverse sender (add back)
-    sender_bal = db.query(WalletBalance).filter(
-        WalletBalance.user_id == out_txn.user_id,
-        WalletBalance.currency == out_txn.currency,
-    ).first()
-    if sender_bal:
-        sender_bal.amount = round(sender_bal.amount + out_txn.amount, 8)
+    # Recipient → sender, exactly once. Refused if the recipient no longer holds the funds
+    # (previously the sender was refunded regardless, creating money).
+    from app.services import ledger
+    from app.services.ledger import InsufficientFunds
+    try:
+        ledger.transfer(
+            db, currency=out_txn.currency, amount=in_txn.amount,
+            from_user_id=in_txn.user_id, from_bucket="available",
+            to_user_id=out_txn.user_id, to_bucket="available",
+            reference_type="transfer_reversal", reference_id=out_txn.reference,
+            description=f"Admin reversal: {reason[:100]}",
+            idempotency_key=str(out_txn.id),
+        )
+    except InsufficientFunds as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "RECIPIENT_INSUFFICIENT_FUNDS",
+            "message": f"The recipient only has {out_txn.currency} {float(e.have):.2f} available, so the transfer can't be reversed in full.",
+        })
 
-    # Reverse recipient (deduct)
-    if in_txn:
-        recip_bal = db.query(WalletBalance).filter(
-            WalletBalance.user_id == in_txn.user_id,
-            WalletBalance.currency == in_txn.currency,
-        ).first()
-        if recip_bal:
-            recip_bal.amount = max(0, round(recip_bal.amount - in_txn.amount, 8))
-        in_txn.status = "reversed"
-        _notify(db, in_txn.user_id, "Transfer Reversed", f"A transfer of {in_txn.currency} {in_txn.amount:.2f} to your wallet has been reversed by admin. Reason: {reason}")
-
+    in_txn.status = "reversed"
+    _notify(db, in_txn.user_id, "Transfer Reversed", f"A transfer of {in_txn.currency} {in_txn.amount:.2f} to your wallet has been reversed by admin. Reason: {reason}")
     out_txn.status = "reversed"
     _notify(db, out_txn.user_id, "Transfer Reversed", f"Your transfer of {out_txn.currency} {out_txn.amount:.2f} has been reversed. Funds returned. Reason: {reason}")
 
@@ -1387,7 +1399,7 @@ def approve_withdrawal(
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
         WalletTransaction.type == "withdrawal",
-    ).first()
+    ).with_for_update().first()
     if not txn:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Withdrawal not found."})
     if txn.status != "pending":
@@ -1396,17 +1408,25 @@ def approve_withdrawal(
             detail={"error": "INVALID_STATUS", "message": f"Withdrawal is already '{txn.status}'."},
         )
 
+    from app.services import ledger
+    from app.services.ledger import InsufficientFunds
+    try:
+        ledger.debit(
+            db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount, from_bucket="pending",
+            reference_type="withdrawal_paid", reference_id=str(txn.id),
+            description=f"Withdrawal paid{(' — ' + notes) if notes else ''}",
+            idempotency_key=str(txn.id),
+        )
+    except InsufficientFunds:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "PENDING_MISMATCH",
+            "message": "The user's pending balance doesn't cover this withdrawal. Check the ledger before paying.",
+        })
+
     txn.status = "completed"
     if notes:
         txn.reference = notes
-
-    # Release from pending_amount
-    balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == txn.user_id,
-        WalletBalance.currency == txn.currency,
-    ).first()
-    if balance and balance.pending_amount >= txn.amount:
-        balance.pending_amount = round(balance.pending_amount - txn.amount, 8)
 
     _notify(
         db, txn.user_id,
@@ -1427,7 +1447,7 @@ def reject_withdrawal(
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
         WalletTransaction.type == "withdrawal",
-    ).first()
+    ).with_for_update().first()
     if not txn:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Withdrawal not found."})
     if txn.status != "pending":
@@ -1436,15 +1456,23 @@ def reject_withdrawal(
             detail={"error": "INVALID_STATUS", "message": f"Withdrawal is already '{txn.status}'."},
         )
 
-    # Return funds
-    balance = db.query(WalletBalance).filter(
-        WalletBalance.user_id == txn.user_id,
-        WalletBalance.currency == txn.currency,
-    ).first()
-    if balance:
-        balance.amount = round(balance.amount + txn.amount, 8)
-        if balance.pending_amount >= txn.amount:
-            balance.pending_amount = round(balance.pending_amount - txn.amount, 8)
+    # Return funds: pending → available, exactly once.
+    from app.services import ledger
+    from app.services.ledger import InsufficientFunds
+    try:
+        ledger.move(
+            db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount,
+            from_bucket="pending", to_bucket="available",
+            reference_type="withdrawal_reversal", reference_id=str(txn.id),
+            description=f"Withdrawal rejected: {reason[:100]}",
+            idempotency_key=str(txn.id),
+        )
+    except InsufficientFunds:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "PENDING_MISMATCH",
+            "message": "The user's pending balance doesn't cover this withdrawal. Check the ledger.",
+        })
 
     txn.status = "failed"
     txn.description = f"Rejected by admin: {reason}"

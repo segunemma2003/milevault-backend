@@ -217,23 +217,28 @@ def cancel_unfunded_transaction(self, transaction_id: str) -> dict:
         if (tx.funded_milestones or 0) > 0:
             return {"status": "has_funded_milestones"}
 
-        # Refund any partial escrow (edge case: partial fund that never completed a milestone)
+        # Refund only THIS transaction's partially-funded milestones. (Previously this moved
+        # the buyer's ENTIRE escrow balance — including money locked for other deals — back
+        # to available.) Exactly once per transaction.
+        from app.services import ledger
         currency = tx.currency
-        buyer_balance = db.query(WalletBalance).filter(
-            WalletBalance.user_id == tx.buyer_id,
-            WalletBalance.currency == currency,
-        ).first()
-        if buyer_balance and (buyer_balance.escrow_amount or 0) > 0:
-            refund_amount = buyer_balance.escrow_amount
-            buyer_balance.amount += refund_amount
-            buyer_balance.escrow_amount = 0
-            db.add(LedgerEntry(
-                debit_user_id=None, credit_user_id=tx.buyer_id,
-                debit_account="escrow", credit_account="available",
-                amount=refund_amount, currency=currency,
-                reference_type="refund", reference_id=transaction_id,
+        partial = db.query(Milestone).filter(
+            Milestone.transaction_id == tx.id,
+            Milestone.status != "completed",
+        ).with_for_update().all()
+        refund_amount = sum(float(m.funded_amount or 0) for m in partial)
+        if refund_amount > 0:
+            applied = ledger.move(
+                db, user_id=tx.buyer_id, currency=currency, amount=refund_amount,
+                from_bucket="escrow", to_bucket="available",
+                reference_type="funding_deadline_refund", reference_id=transaction_id,
                 description="Auto-refund: transaction cancelled due to funding deadline",
-            ))
+                idempotency_key=transaction_id,
+            )
+            if applied:
+                for m in partial:
+                    m.funded_amount = 0.0
+                    m.is_funded = False
 
         tx.status = "cancelled"
         create_notification(
@@ -304,22 +309,49 @@ def process_refund(self, refund_id: str) -> dict:
         if not refund:
             return {"status": "not_found"}
 
-        # Add actual gateway call here based on original payment method
-        # For now: update wallet balance
-        from app.models.wallet import WalletBalance, WalletTransaction as WalletTx
-        balance = db.query(WalletBalance).filter(
-            WalletBalance.user_id == str(refund.refund_to),
-            WalletBalance.currency == refund.currency,
-        ).first()
-        if balance:
-            balance.amount += refund.amount
-        else:
-            balance = WalletBalance(
-                user_id=str(refund.refund_to),
-                currency=refund.currency,
-                amount=refund.amount,
+        if refund.status == "completed":
+            return {"status": "already_completed", "refund_id": refund_id}
+
+        # A refund returns money that is held in the BUYER'S ESCROW for this transaction.
+        # (Previously it credited the recipient from nowhere and left escrow untouched,
+        # so the same funds could be paid out twice.) Exactly once per refund id.
+        from app.models.transaction import Transaction
+        from app.models.wallet import WalletTransaction as WalletTx
+        from app.services import ledger
+        from app.services.ledger import InsufficientFunds
+
+        tx = db.query(Transaction).filter(Transaction.id == refund.transaction_id).first()
+        if not tx:
+            refund.status = "failed"
+            refund.admin_notes = ((refund.admin_notes or "") + " | Transaction not found").strip(" |")
+            db.commit()
+            return {"status": "failed", "reason": "transaction_not_found"}
+
+        try:
+            applied = ledger.transfer(
+                db, currency=refund.currency, amount=refund.amount,
+                from_user_id=str(tx.buyer_id), from_bucket="escrow",
+                to_user_id=str(refund.refund_to), to_bucket="available",
+                reference_type="refund", reference_id=str(refund.id),
+                description=f"Dispute refund {str(refund.id)[:8]}",
+                idempotency_key=str(refund.id),
             )
-            db.add(balance)
+        except InsufficientFunds as e:
+            db.rollback()
+            refund = db.query(Refund).filter(Refund.id == refund_id).first()
+            refund.status = "failed"
+            refund.admin_notes = (
+                (refund.admin_notes or "")
+                + f" | Escrow shortfall: buyer escrow {e.have} < refund {e.need}. Not applied."
+            ).strip(" |")
+            db.commit()
+            logger.error("Refund %s not applied: escrow shortfall (%s < %s)", refund_id, e.have, e.need)
+            return {"status": "failed", "reason": "escrow_shortfall"}
+
+        if not applied:
+            refund.status = "completed"
+            db.commit()
+            return {"status": "already_completed", "refund_id": refund_id}
 
         wallet_tx = WalletTx(
             user_id=str(refund.refund_to),
@@ -603,5 +635,32 @@ def cleanup_unverified_accounts(self) -> dict:
     except Exception as exc:
         db.rollback()
         raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=1, name="app.services.tasks.reconcile_ledger")
+def reconcile_ledger(self) -> dict:
+    """Nightly: every stored balance must equal what the ledger says. Alerts admins otherwise."""
+    from app.database import SessionLocal
+    from app.models.notification import Notification
+    from app.models.user import User
+    from app.services.reconciliation import compute_mismatches, negative_balances
+
+    db = SessionLocal()
+    try:
+        mismatches = compute_mismatches(db)
+        negatives = negative_balances(db)
+        if mismatches or negatives:
+            logger.error("LEDGER RECONCILIATION: %d mismatches, %d negative balances. Top: %s",
+                         len(mismatches), len(negatives), (mismatches + negatives)[:5])
+            msg = (f"{len(mismatches)} balance(s) don't match the ledger and {len(negatives)} are negative. "
+                   "Review before processing withdrawals.")
+            for admin in db.query(User).filter(User.is_admin.is_(True)).all():
+                db.add(Notification(user_id=str(admin.id), title="Ledger reconciliation alert", message=msg, type="admin"))
+            db.commit()
+        else:
+            logger.warning("LEDGER RECONCILIATION OK: all balances match the ledger.")
+        return {"mismatches": len(mismatches), "negatives": len(negatives), "sample": mismatches[:10]}
     finally:
         db.close()

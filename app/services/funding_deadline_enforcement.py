@@ -37,26 +37,16 @@ def enforce_funding_deadline_if_due(db: Session, transaction_id: str) -> Dict[st
         if amt <= 0:
             return 0.0
         currency = m.currency or tx.currency
-        buyer_balance = db.query(WalletBalance).filter(
-            WalletBalance.user_id == tx.buyer_id,
-            WalletBalance.currency == currency,
-        ).first()
-        if buyer_balance:
-            buyer_balance.escrow_amount = max(0.0, round((buyer_balance.escrow_amount or 0) - amt, 8))
-            buyer_balance.amount = round((buyer_balance.amount or 0) + amt, 8)
-        db.add(
-            LedgerEntry(
-                debit_user_id=tx.buyer_id,
-                credit_user_id=tx.buyer_id,
-                debit_account="escrow",
-                credit_account="available",
-                amount=amt,
-                currency=currency,
-                reference_type="refund",
-                reference_id=m.id,
-                description=f"Funding deadline refund for milestone '{m.title}'",
-            )
+        from app.services import ledger
+        applied = ledger.move(
+            db, user_id=tx.buyer_id, currency=currency, amount=amt,
+            from_bucket="escrow", to_bucket="available",
+            reference_type="funding_deadline_refund", reference_id=m.id,
+            description=f"Funding deadline refund for milestone '{m.title}'",
+            idempotency_key=m.id,
         )
+        if not applied:
+            return 0.0
         db.add(
             WalletTransaction(
                 user_id=tx.buyer_id,

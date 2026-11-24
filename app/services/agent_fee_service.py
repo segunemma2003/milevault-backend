@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 
 from app.models.agent import Agent, AgentEarning, AgentRequest, AgentRequestStatus
 from app.models.transaction import Transaction
+from app.services import ledger
+from app.services.ledger import InsufficientFunds
 from app.models.wallet import LedgerEntry, WalletBalance, WalletTransaction
 
 
@@ -52,26 +54,19 @@ def hold_agent_fee_on_agent_accept(db: Session, req: AgentRequest) -> Optional[A
 
     currency = (req.fee_currency or "USD").upper()
     fee = round(float(req.fee_charged), 8)
-    buyer_bal = _get_balance(db, str(req.buyer_id), currency)
-    if (buyer_bal.amount or 0) < fee:
+    try:
+        held = ledger.debit(
+            db, user_id=str(req.buyer_id), currency=currency, amount=fee, from_bucket="available",
+            reference_type="agent_fee_hold", reference_id=str(req.id),
+            description="Agent verification fee held until verification completes or admin payout",
+            idempotency_key=str(req.id), external_account="platform",
+        )
+    except InsufficientFunds:
         raise ValueError(
             f"INSUFFICIENT_FUNDS: Need {currency} {fee:.2f} in wallet to cover the agent verification fee."
         )
-
-    buyer_bal.amount = round((buyer_bal.amount or 0) - fee, 8)
-    db.add(
-        LedgerEntry(
-            debit_user_id=str(req.buyer_id),
-            credit_user_id=None,
-            debit_account="available",
-            credit_account="platform",
-            amount=fee,
-            currency=currency,
-            reference_type="agent_fee_hold",
-            reference_id=str(req.id),
-            description="Agent verification fee held until verification completes or admin payout",
-        )
-    )
+    if not held:
+        return db.query(AgentEarning).filter(AgentEarning.request_id == req.id).first()
     db.add(
         WalletTransaction(
             user_id=str(req.buyer_id),
@@ -105,21 +100,15 @@ def hold_agent_fee_on_agent_accept(db: Session, req: AgentRequest) -> Optional[A
 def _refund_one_held_earning(db: Session, tx: Transaction, earning: AgentEarning, req: AgentRequest) -> None:
     currency = (earning.currency or "USD").upper()
     fee = round(float(earning.gross_fee), 8)
-    buyer_bal = _get_balance(db, str(tx.buyer_id), currency)
-    buyer_bal.amount = round((buyer_bal.amount or 0) + fee, 8)
-    db.add(
-        LedgerEntry(
-            debit_user_id=None,
-            credit_user_id=str(tx.buyer_id),
-            debit_account="platform",
-            credit_account="available",
-            amount=fee,
-            currency=currency,
-            reference_type="agent_fee_refund",
-            reference_id=str(req.id),
-            description="Agent fee refunded (verification not completed / policy)",
-        )
+    applied = ledger.credit(
+        db, user_id=str(tx.buyer_id), currency=currency, amount=fee, to_bucket="available",
+        reference_type="agent_fee_refund", reference_id=str(req.id),
+        description="Agent fee refunded (verification not completed / policy)",
+        idempotency_key=str(earning.id), external_account="platform",
     )
+    if not applied:
+        earning.status = "refunded"
+        return
     db.add(
         WalletTransaction(
             user_id=str(tx.buyer_id),
@@ -163,21 +152,15 @@ def _payout_one_held_earning(db: Session, tx: Transaction, earning: AgentEarning
         earning.status = "paid"
         earning.paid_at = datetime.utcnow()
         return
-    bal = _get_balance(db, agent_user_id, currency)
-    bal.amount = round((bal.amount or 0) + payout, 8)
-    db.add(
-        LedgerEntry(
-            debit_user_id=None,
-            credit_user_id=agent_user_id,
-            debit_account="platform",
-            credit_account="available",
-            amount=payout,
-            currency=currency,
-            reference_type="agent_fee_payout",
-            reference_id=str(earning.request_id),
-            description="Agent verification fee released after eligibility confirmed",
-        )
+    applied = ledger.credit(
+        db, user_id=agent_user_id, currency=currency, amount=payout, to_bucket="available",
+        reference_type="agent_fee_payout", reference_id=str(earning.request_id),
+        description="Agent verification fee released after eligibility confirmed",
+        idempotency_key=str(earning.id), external_account="platform",
     )
+    if not applied:
+        earning.status = "paid"
+        return
     db.add(
         WalletTransaction(
             user_id=agent_user_id,

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     AWS_S3_ENDPOINT_URL: str = ""
     # Optional key prefix so several apps can share one bucket, e.g. "bondrova/"
     S3_KEY_PREFIX: str = ""
+
+    # Converts money columns from double precision to exact NUMERIC(28,8) on startup.
+    # Off until a database backup has been taken; then set MONEY_PRECISION_MIGRATION=true.
+    MONEY_PRECISION_MIGRATION: bool = False
     CDN_BASE_URL: str = ""             # Optional CloudFront URL
 
     # Redis

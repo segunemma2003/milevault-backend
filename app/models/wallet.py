@@ -1,8 +1,23 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Boolean, Text
+from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
+
+
+class ProcessedEvent(Base):
+    """
+    Exactly-once guard for money events. A row is inserted in the SAME database
+    transaction as the balance change; the unique (source, event_id) pair makes a
+    second attempt (webhook retry, double click, reconciliation re-run) a no-op.
+    """
+    __tablename__ = "processed_events"
+    __table_args__ = (UniqueConstraint("source", "event_id", name="uq_processed_events_source_event"),)
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    source = Column(String(60), nullable=False)      # e.g. "deposit:paystack", "milestone_release"
+    event_id = Column(String(255), nullable=False)   # provider tx id / reference / our own key
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class WalletBalance(Base):

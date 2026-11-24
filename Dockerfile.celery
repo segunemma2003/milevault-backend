@@ -11,4 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+# -B runs the beat scheduler inside this (single) worker so the daily/5-minute jobs actually fire.
+CMD ["sh", "-c", "celery -A app.services.celery_app worker -B --loglevel=info --concurrency=2 -Q default,media,notifications,kyc,payments --schedule /tmp/celerybeat-schedule"]

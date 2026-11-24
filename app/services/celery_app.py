@@ -18,6 +18,8 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,        # Acknowledge after completion (prevents loss on crash)
     worker_prefetch_multiplier=1,
+    # Unrouted tasks (auto-release, every beat job) must land on a queue the worker consumes.
+    task_default_queue="default",
     task_routes={
         "app.services.tasks.watermark_image": {"queue": "media"},
         "app.services.tasks.watermark_video": {"queue": "media"},
@@ -41,6 +43,10 @@ celery_app.conf.update(
         "cleanup-unverified-accounts-every-5min": {
             "task": "app.services.tasks.cleanup_unverified_accounts",
             "schedule": crontab(minute="*/5"),
+        },
+        "reconcile-ledger-nightly": {
+            "task": "app.services.tasks.reconcile_ledger",
+            "schedule": crontab(hour=2, minute=30),
         },
     },
 )
