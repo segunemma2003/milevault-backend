@@ -82,12 +82,12 @@ def _issue_password_reset_token(user: User) -> str:
 
 def _send_email_direct(to_email: str, subject: str, body_html: str) -> None:
     """Send via Resend API directly — no Celery worker needed."""
-    from app.services.email_template import render_email, sender as email_sender
     if not settings.RESEND_API_KEY:
         logger.warning(f"[EMAIL NOT SENT — RESEND_API_KEY missing] To: {to_email} | Subject: {subject}")
         return
     try:
         import httpx
+        from app.services.email_template import render_email, sender as email_sender
         resp = httpx.post(
             "https://api.resend.com/emails",
             json={
@@ -108,18 +108,20 @@ def _send_email_direct(to_email: str, subject: str, body_html: str) -> None:
         logger.error(f"[EMAIL FAILED] to={to_email} subject={subject!r}: {exc!r}")
 
 
-def _send_verification_email(user: User, raw_token: str) -> None:
+def _send_verification_email(to_email: str, first_name: str, raw_token: str) -> None:
+    """Runs AFTER the response, when the DB session is closed — so it takes plain values, never ORM objects."""
+    import html
     from app.services.email_template import button
     verify_url = f"{settings.FRONTEND_URL}/verify-email?token={raw_token}"
     body_html = (
         f"<h2>Verify your Bondrova email</h2>"
-        f"<p>Hi {user.first_name},</p>"
+        f"<p>Hi {html.escape(first_name or 'there')},</p>"
         f"<p>Click the button below to verify your email address and activate your account access.</p>"
         f"<p>{button(verify_url, 'Verify Email')}</p>"
         f"<p>Or copy this link:</p><p>{verify_url}</p>"
         f"<p>This link expires in {EMAIL_VERIFICATION_TTL_MINUTES} minutes.</p>"
     )
-    _send_email_direct(user.email, "Verify your Bondrova email", body_html)
+    _send_email_direct(to_email, "Verify your Bondrova email", body_html)
 
 
 def _email_verification_required(db: Session) -> bool:
@@ -141,17 +143,19 @@ def _delete_if_unverified_expired(db: Session, user: User) -> bool:
     return True
 
 
-def _send_password_reset_email(user: User, raw_token: str) -> None:
+def _send_password_reset_email(to_email: str, first_name: str, raw_token: str) -> None:
+    """Runs after the response — plain values only (see _send_verification_email)."""
+    import html
     from app.services.email_template import button
     reset_url = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
     body_html = (
         f"<h2>Reset your Bondrova password</h2>"
-        f"<p>Hi {user.first_name},</p>"
+        f"<p>Hi {html.escape(first_name or 'there')},</p>"
         f"<p>Click below to set a new password:</p>"
         f"<p>{button(reset_url, 'Reset Password')}</p>"
         f"<p>This link expires in 1 hour.</p>"
     )
-    _send_email_direct(user.email, "Reset your Bondrova password", body_html)
+    _send_email_direct(to_email, "Reset your Bondrova password", body_html)
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
@@ -209,7 +213,7 @@ def register(payload: RegisterRequest, response: Response, background_tasks: Bac
     db.commit()
     db.refresh(user)
     if require_email_verification and raw_token:
-        background_tasks.add_task(_send_verification_email, user, raw_token)
+        background_tasks.add_task(_send_verification_email, user.email, user.first_name, raw_token)
         try:
             from app.services.notification_service import create_notification
             create_notification(
@@ -339,7 +343,7 @@ def resend_verification(payload: ResendVerificationRequest, background_tasks: Ba
         return {"message": "Email is already verified. Please sign in."}
     raw_token = _issue_email_verification_token(user)
     db.commit()
-    background_tasks.add_task(_send_verification_email, user, raw_token)
+    background_tasks.add_task(_send_verification_email, user.email, user.first_name, raw_token)
     try:
         from app.services.notification_service import create_notification
         create_notification(
@@ -361,7 +365,7 @@ def forgot_password(payload: ForgotPasswordRequest, background_tasks: Background
     if user and user.is_active:
         raw = _issue_password_reset_token(user)
         db.commit()
-        background_tasks.add_task(_send_password_reset_email, user, raw)
+        background_tasks.add_task(_send_password_reset_email, user.email, user.first_name, raw)
     return {"message": "If an account exists for this email, a reset link has been sent."}
 
 
