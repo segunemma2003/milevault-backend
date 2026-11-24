@@ -64,13 +64,13 @@ jobs:
       - name: Deploy backend service
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service milevault-backend --detach
+        run: railway up --service backend --detach
 
       - name: Run DB migrations
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service milevault-backend \
+          railway run --service backend \
             python -m alembic upgrade head \
             || echo "Alembic not configured — skipping."
 
@@ -78,7 +78,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service milevault-backend \
+          railway run --service backend \
             python scripts/seed_admin.py
 
   # ── CD: deploy celery worker to Railway ─────────────────────────────────────
@@ -95,4 +95,4 @@ jobs:
       - name: Deploy celery-worker service
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service milevault-celery --detach
+        run: railway up --service celery-worker --detach
