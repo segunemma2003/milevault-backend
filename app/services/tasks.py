@@ -21,19 +21,13 @@ def watermark_image(self, s3_key: str, user_id: str) -> dict:
     Replaces the original — presigned download URL stays the same.
     """
     try:
-        import boto3
-        from app.services.s3_service import add_watermark_to_image
+        from app.services.s3_service import add_watermark_to_image, _get_s3_client
 
         if not settings.s3_enabled:
             logger.info(f"S3 not configured — skipping watermark for {s3_key}")
             return {"status": "skipped", "key": s3_key}
 
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION,
-        )
+        s3 = _get_s3_client()
         response = s3.get_object(Bucket=settings.S3_BUCKET_NAME, Key=s3_key)
         original_bytes = response["Body"].read()
 
@@ -72,13 +66,8 @@ def watermark_video(self, s3_key: str, user_id: str) -> dict:
         return {"status": "skipped", "key": s3_key}
 
     try:
-        import boto3
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION,
-        )
+        from app.services.s3_service import _get_s3_client
+        s3 = _get_s3_client()
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = os.path.join(tmpdir, "input.mp4")
             output_path = os.path.join(tmpdir, "output.mp4")

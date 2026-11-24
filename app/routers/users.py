@@ -1,6 +1,6 @@
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.user import UserOut, UpdateProfileRequest, UserSettingsOut, UpdateSettingsRequest
@@ -9,6 +9,24 @@ from app.dependencies import get_current_user
 from app.config import settings
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+def _public_api_base(request: Request) -> str:
+    base = str(request.base_url).rstrip("/")
+    host = request.url.hostname or ""
+    if base.startswith("http://") and host not in ("localhost", "127.0.0.1"):
+        base = "https://" + base[len("http://"):]  # Railway terminates TLS at the proxy
+    return base
+
+
+async def _read_upload_request(request: Request):
+    """Accept either JSON {"s3_key": ...} (file already PUT to the bucket) or a multipart file."""
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/json"):
+        body = await request.json()
+        return "key", body
+    form = await request.form()
+    return "file", form
 
 
 @router.get("/me", response_model=UserOut)
@@ -42,25 +60,35 @@ def update_profile(
 
 @router.post("/me/avatar", response_model=UserOut)
 async def upload_avatar(
-    file: UploadFile = File(...),
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Set the avatar from an s3_key (browser already uploaded it) or from a multipart `file`."""
+    from app.services.s3_service import owns_key, put_bytes, _build_s3_key
+
     allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Only image files are allowed")
+    kind, data = await _read_upload_request(request)
+    if kind == "key":
+        s3_key = str(data.get("s3_key") or "")
+        if not owns_key(s3_key, "avatars", str(current_user.id)):
+            raise HTTPException(status_code=400, detail="Invalid avatar upload key")
+    else:
+        file = data.get("file")
+        if file is None or not hasattr(file, "read"):
+            raise HTTPException(status_code=400, detail="No file provided")
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="Only image files are allowed")
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+        s3_key = _build_s3_key("avatars", file.filename or "avatar.jpg", str(current_user.id))
+        put_bytes(s3_key, content, file.content_type)
 
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    filename = f"avatar_{current_user.id}_{uuid.uuid4().hex}.{ext}"
-    upload_path = os.path.join(settings.UPLOAD_DIR, "avatars")
-    os.makedirs(upload_path, exist_ok=True)
-
-    file_path = os.path.join(upload_path, filename)
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    current_user.avatar_url = f"/uploads/avatars/{filename}"
+    if settings.s3_enabled:
+        current_user.avatar_url = f"{_public_api_base(request)}/api/v1/uploads/avatar/{s3_key}"
+    else:
+        current_user.avatar_url = f"{_public_api_base(request)}/api/v1/uploads/local/{s3_key}"
     db.commit()
     db.refresh(current_user)
     return current_user

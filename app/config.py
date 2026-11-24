@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
     S3_BUCKET_NAME: str = "milevault-uploads"
     S3_PRESIGNED_EXPIRY: int = 3600    # 1 hour for presigned URLs
+    # S3-compatible providers (e.g. Backblaze B2: https://s3.us-east-005.backblazeb2.com). Empty = AWS.
+    AWS_S3_ENDPOINT_URL: str = ""
+    # Optional key prefix so several apps can share one bucket, e.g. "bondrova/"
+    S3_KEY_PREFIX: str = ""
     CDN_BASE_URL: str = ""             # Optional CloudFront URL
 
     # Redis

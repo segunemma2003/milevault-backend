@@ -1,8 +1,8 @@
 """
 Upload router — S3 presigned URL generation + local fallback.
 Flow for images/documents:
-  1. Client calls POST /uploads/presign  →  gets {url, fields, s3_key}
-  2. Client uploads DIRECTLY to S3 using the presigned POST  (no server involved)
+  1. Client calls POST /uploads/presign  →  gets {upload_url, fields (headers), s3_key}
+  2. Client PUTs the file DIRECTLY to the bucket (AWS S3 or Backblaze B2) with those headers
   3. After S3 confirms, client sends s3_key back to relevant endpoint.
 
 For videos: same flow + Celery watermark task is queued post-upload.
@@ -12,7 +12,7 @@ import os
 import mimetypes
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Path
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import get_current_user
@@ -20,6 +20,7 @@ from app.models.user import User
 from app.services.s3_service import (
     get_presigned_upload_url,
     get_presigned_download_url,
+    get_presigned_view_url,
     save_local_upload,
     ALLOWED_IMAGE_TYPES,
     ALLOWED_VIDEO_TYPES,
@@ -45,10 +46,11 @@ def get_presign(
     filename: str,
     content_type: str,
     folder: str = "general",
+    size: Optional[int] = None,
     current_user: User = Depends(get_current_user),
 ):
     """
-    Returns a presigned POST URL so the client can upload directly to S3.
+    Returns a presigned PUT URL so the client can upload directly to S3.
     This keeps large files off the API server and ensures uploads < 3s for the API call.
 
     Response:
@@ -78,6 +80,7 @@ def get_presign(
             filename=filename,
             content_type=content_type,
             user_id=str(current_user.id),
+            size=size,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"error": "PRESIGN_ERROR", "message": str(e)})
@@ -89,7 +92,7 @@ def get_presign(
         "s3_key": s3_key,
         "upload_url": upload_url,
         "fields": fields,
-        "method": "s3" if settings.s3_enabled else "local",
+        "method": ("s3_put" if settings.AWS_S3_ENDPOINT_URL else "s3") if settings.s3_enabled else "local",
         "watermark_queued": is_video or is_image,
         "note": (
             "After uploading, call POST /uploads/confirm with s3_key to trigger watermarking."
@@ -139,6 +142,16 @@ def get_download_url(
 
     url = get_presigned_download_url(s3_key, filename or "download")
     return {"url": url, "expires_in_seconds": settings.S3_PRESIGNED_EXPIRY}
+
+
+@router.get("/avatar/{s3_key:path}", include_in_schema=False)
+def view_avatar(s3_key: str):
+    """Public, cacheable redirect to a short-lived presigned URL for an avatar image."""
+    if ".." in s3_key or "/avatars/" not in f"/{s3_key}":
+        raise HTTPException(status_code=404, detail="Not found")
+    resp = RedirectResponse(get_presigned_view_url(s3_key), status_code=307)
+    resp.headers["Cache-Control"] = "private, max-age=1800"
+    return resp
 
 
 # ─── Local fallback endpoints (used when S3 is not configured) ───────────────

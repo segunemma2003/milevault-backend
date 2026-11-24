@@ -22,19 +22,63 @@ MAX_DOCUMENT_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 def _get_s3_client():
+    """S3 client for AWS or any S3-compatible provider (Backblaze B2, R2, MinIO)."""
     import boto3
-    return boto3.client(
-        "s3",
+    from botocore.config import Config
+
+    kwargs = dict(
         aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
         aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
         region_name=settings.AWS_REGION,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
     )
+    if settings.AWS_S3_ENDPOINT_URL:
+        kwargs["endpoint_url"] = settings.AWS_S3_ENDPOINT_URL
+    return boto3.client("s3", **kwargs)
+
+
+def key_prefix() -> str:
+    p = settings.S3_KEY_PREFIX.strip().strip("/")
+    return f"{p}/" if p else ""
 
 
 def _build_s3_key(folder: str, filename: str, user_id: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
+    ext = "".join(c for c in ext if c.isalnum())[:10] or "bin"
     unique_name = f"{uuid.uuid4().hex}.{ext}"
-    return f"{folder}/{user_id}/{unique_name}"
+    return f"{key_prefix()}{folder}/{user_id}/{unique_name}"
+
+
+def owns_key(s3_key: str, folder: str, user_id: str) -> bool:
+    """True when the key was issued to this user for this folder by get_presigned_upload_url."""
+    return (
+        bool(s3_key)
+        and ".." not in s3_key
+        and s3_key.startswith(f"{key_prefix()}{folder}/{user_id}/")
+    )
+
+
+def put_bytes(s3_key: str, data: bytes, content_type: str) -> None:
+    """Server-side upload (used when the API receives the file itself)."""
+    if not settings.s3_enabled:
+        save_local_upload(s3_key, data)
+        return
+    _get_s3_client().put_object(
+        Bucket=settings.S3_BUCKET_NAME, Key=s3_key, Body=data, ContentType=content_type
+    )
+
+
+def get_presigned_view_url(s3_key: str, expires: Optional[int] = None) -> str:
+    """Presigned GET suitable for <img src> (inline, no download disposition)."""
+    if not settings.s3_enabled:
+        return f"/api/v1/uploads/local/{s3_key}"
+    if settings.CDN_BASE_URL:
+        return f"{settings.CDN_BASE_URL.rstrip('/')}/{s3_key}"
+    return _get_s3_client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.S3_BUCKET_NAME, "Key": s3_key},
+        ExpiresIn=expires or settings.S3_PRESIGNED_EXPIRY,
+    )
 
 
 def get_presigned_upload_url(
@@ -43,9 +87,14 @@ def get_presigned_upload_url(
     content_type: str,
     user_id: str,
     max_size: Optional[int] = None,
+    size: Optional[int] = None,
 ) -> Tuple[str, str, dict]:
     """
-    Returns (s3_key, presigned_post_url, fields) for direct browser → S3 upload.
+    Returns (s3_key, presigned_put_url, headers) for direct browser → bucket upload.
+    The browser must PUT the file with exactly these headers.
+    Presigned PUT is used (not POST) because Backblaze B2 does not support
+    browser POST policies. When `size` is given it is signed into the URL,
+    so the bucket rejects any body of a different length.
     Falls back to a local upload endpoint URL when S3 is not configured.
     """
     if content_type not in ALL_ALLOWED_TYPES:
@@ -65,19 +114,27 @@ def get_presigned_upload_url(
         # Fallback: return a local endpoint
         return s3_key, f"/api/v1/uploads/local/{s3_key}", {}
 
-    s3 = _get_s3_client()
-    conditions = [
-        ["content-length-range", 1, max_size],
-        {"Content-Type": content_type},
-    ]
-    response = s3.generate_presigned_post(
-        Bucket=settings.S3_BUCKET_NAME,
-        Key=s3_key,
-        Fields={"Content-Type": content_type},
-        Conditions=conditions,
-        ExpiresIn=900,  # 15 minutes to complete upload
+    if size is not None and (size < 1 or size > max_size):
+        raise ValueError(f"File is too large. Maximum size is {max_size // (1024 * 1024)} MB.")
+
+    if not settings.AWS_S3_ENDPOINT_URL:
+        # Native AWS: keep the presigned POST policy (enforces size server-side).
+        response = _get_s3_client().generate_presigned_post(
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=s3_key,
+            Fields={"Content-Type": content_type},
+            Conditions=[["content-length-range", 1, max_size], {"Content-Type": content_type}],
+            ExpiresIn=900,
+        )
+        return s3_key, response["url"], response["fields"]
+
+    params = {"Bucket": settings.S3_BUCKET_NAME, "Key": s3_key, "ContentType": content_type}
+    if size is not None:
+        params["ContentLength"] = size
+    url = _get_s3_client().generate_presigned_url(
+        "put_object", Params=params, ExpiresIn=900,  # 15 minutes to complete upload
     )
-    return s3_key, response["url"], response["fields"]
+    return s3_key, url, {"Content-Type": content_type}
 
 
 def get_presigned_download_url(s3_key: str, filename: str = "download") -> str:

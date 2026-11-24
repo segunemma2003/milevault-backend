@@ -45,10 +45,12 @@ def _seed_admin() -> None:
         try:
             existing = db.query(User).filter(User.email == settings.ADMIN_EMAIL).first()
             if existing:
-                if not existing.is_admin:
+                if not (existing.is_admin and existing.is_email_verified and existing.is_active):
                     existing.is_admin = True
+                    existing.is_email_verified = True
+                    existing.is_active = True
                     db.commit()
-                    logger.info(f"Admin flag set on existing user: {settings.ADMIN_EMAIL}")
+                    logger.info(f"Admin flags ensured on existing user: {settings.ADMIN_EMAIL}")
                 return
 
             pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=10)
@@ -63,6 +65,7 @@ def _seed_admin() -> None:
                 is_admin=True,
                 is_active=True,
                 is_kyc_verified=True,
+                is_email_verified=True,
                 country_code="NG",
             )
             db.add(admin)

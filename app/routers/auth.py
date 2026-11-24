@@ -254,6 +254,8 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
                 "message": "Your account has been deactivated. Please contact support@bondrova.com.",
             },
         )
+    if user.is_admin:
+        require_email_verification = False  # admins are provisioned by the platform, never self-registered
     if require_email_verification and _delete_if_unverified_expired(db, user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

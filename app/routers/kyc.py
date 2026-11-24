@@ -1,6 +1,6 @@
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.kyc import KycDocument
@@ -10,6 +10,16 @@ from app.services.notification_service import create_notification
 from app.config import settings
 
 router = APIRouter(prefix="/kyc", tags=["kyc"])
+
+
+async def _read_upload_request(request: Request):
+    """Accept either JSON {"s3_key": ...} (file already PUT to the bucket) or a multipart file."""
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/json"):
+        body = await request.json()
+        return "key", body
+    form = await request.form()
+    return "file", form
 
 REQUIRED_DOCS = {"id_card", "passport", "drivers_license"}
 ADDRESS_DOC = "address_proof"
@@ -58,31 +68,37 @@ def get_kyc_status(current_user: User = Depends(get_current_user), db: Session =
 
 @router.post("/upload", status_code=201)
 async def upload_kyc_document(
-    doc_type: str = Form(...),
-    file: UploadFile = File(...),
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Accepts JSON {doc_type, s3_key, filename} (file already in the bucket) or multipart doc_type + file."""
+    from app.services.s3_service import owns_key, put_bytes, _build_s3_key
+
     valid_types = {"id_card", "passport", "drivers_license", "address_proof", "selfie"}
+    allowed_content_types = {"image/jpeg", "image/png", "application/pdf"}
+    kind, data = await _read_upload_request(request)
+    doc_type = str(data.get("doc_type") or "")
     if doc_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"Invalid document type. Must be one of: {', '.join(valid_types)}")
 
-    allowed_content_types = {"image/jpeg", "image/png", "application/pdf"}
-    if file.content_type not in allowed_content_types:
-        raise HTTPException(status_code=400, detail="Only JPG, PNG, and PDF files are allowed")
-
-    content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
-
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    filename = f"kyc_{current_user.id}_{doc_type}_{uuid.uuid4().hex}.{ext}"
-    upload_path = os.path.join(settings.UPLOAD_DIR, "kyc")
-    os.makedirs(upload_path, exist_ok=True)
-
-    file_path = os.path.join(upload_path, filename)
-    with open(file_path, "wb") as f:
-        f.write(content)
+    if kind == "key":
+        s3_key = str(data.get("s3_key") or "")
+        if not owns_key(s3_key, "kyc_documents", str(current_user.id)):
+            raise HTTPException(status_code=400, detail="Invalid upload key")
+        original_name = str(data.get("filename") or s3_key.rsplit("/", 1)[-1])[:255]
+    else:
+        file = data.get("file")
+        if file is None or not hasattr(file, "read"):
+            raise HTTPException(status_code=400, detail="No file provided")
+        if file.content_type not in allowed_content_types:
+            raise HTTPException(status_code=400, detail="Only JPG, PNG, and PDF files are allowed")
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        original_name = file.filename or "document"
+        s3_key = _build_s3_key("kyc_documents", original_name, str(current_user.id))
+        put_bytes(s3_key, content, file.content_type)
 
     # Remove existing doc of same type if any
     existing = db.query(KycDocument).filter(
@@ -95,8 +111,8 @@ async def upload_kyc_document(
     doc = KycDocument(
         user_id=current_user.id,
         type=doc_type,
-        file_url=f"/uploads/kyc/{filename}",
-        file_name=file.filename,
+        file_url=f"s3:{s3_key}",
+        file_name=original_name,
         status="pending",
     )
     db.add(doc)
