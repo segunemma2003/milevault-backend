@@ -3,7 +3,8 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from xml.sax.saxutils import escape
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -119,6 +120,45 @@ def list_open_jobs(db: Session = Depends(get_db)):
         .all()
     )
     return [_job_out(j) for j in jobs]
+
+
+SITE_URL = "https://bondrova.com"
+STATIC_PAGES = [
+    ("/", "weekly", "1.0"),
+    ("/how-it-works", "monthly", "0.9"),
+    ("/security", "monthly", "0.7"),
+    ("/faq", "monthly", "0.8"),
+    ("/about", "monthly", "0.6"),
+    ("/contact", "yearly", "0.6"),
+    ("/blog", "weekly", "0.7"),
+    ("/careers", "weekly", "0.5"),
+    ("/register", "yearly", "0.6"),
+    ("/privacy", "yearly", "0.3"),
+    ("/terms", "yearly", "0.3"),
+    ("/cookies", "yearly", "0.2"),
+]
+
+
+@router.get("/sitemap.xml", include_in_schema=False)
+def sitemap(db: Session = Depends(get_db)):
+    """XML sitemap: static marketing pages + every published blog post."""
+    urls = [
+        f"<url><loc>{SITE_URL}{path}</loc><changefreq>{freq}</changefreq><priority>{prio}</priority></url>"
+        for path, freq, prio in STATIC_PAGES
+    ]
+    for p in db.query(BlogPost).filter(BlogPost.is_published.is_(True)).all():
+        lastmod = (p.updated_at or p.published_at or datetime.utcnow()).strftime("%Y-%m-%d")
+        urls.append(
+            f"<url><loc>{SITE_URL}/blog/{escape(p.slug)}</loc><lastmod>{lastmod}</lastmod>"
+            f"<changefreq>monthly</changefreq><priority>0.6</priority></url>"
+        )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(urls)
+        + "</urlset>"
+    )
+    return Response(content=xml, media_type="application/xml", headers={"Cache-Control": "public, max-age=3600"})
 
 
 # ─── Admin: blog ──────────────────────────────────────────────────────────────
