@@ -84,7 +84,7 @@ def _send_email_direct(to_email: str, subject: str, body_html: str) -> None:
     """Send via Resend API directly — no Celery worker needed."""
     from app.services.email_template import render_email, sender as email_sender
     if not settings.RESEND_API_KEY:
-        logger.info(f"[DEV EMAIL] To: {to_email} | Subject: {subject}")
+        logger.warning(f"[EMAIL NOT SENT — RESEND_API_KEY missing] To: {to_email} | Subject: {subject}")
         return
     try:
         import httpx
@@ -102,9 +102,10 @@ def _send_email_direct(to_email: str, subject: str, body_html: str) -> None:
         if not resp.is_success:
             logger.error(f"Resend API error {resp.status_code}: {resp.text} | from={settings.DEFAULT_FROM_EMAIL} to={to_email}")
         else:
-            logger.info(f"Email sent via Resend: {to_email} | {subject}")
+            msg_id = (resp.json() or {}).get("id") if resp.content else None
+            logger.warning(f"[EMAIL SENT] id={msg_id} to={to_email} subject={subject!r}")
     except Exception as exc:
-        logger.warning(f"Direct email send failed ({to_email}): {exc}")
+        logger.error(f"[EMAIL FAILED] to={to_email} subject={subject!r}: {exc!r}")
 
 
 def _send_verification_email(user: User, raw_token: str) -> None:
