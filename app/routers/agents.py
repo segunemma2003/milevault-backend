@@ -41,9 +41,14 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _agent_to_dict(agent: Agent, include_user: bool = True) -> dict:
+    u = getattr(agent, "user", None)
     d = {
         "id": str(agent.id),
         "user_id": str(agent.user_id),
+        # Public display name: first name + last initial (full name stays private).
+        "name": (f"{u.first_name} {u.last_name[:1]}.".strip() if u and u.first_name else "Bondrova Agent"),
+        "avatar_url": getattr(u, "avatar_url", None) if u else None,
+        "location": getattr(u, "location", None) if u else None,
         "specialty": agent.specialty,
         "specialty_details": agent.specialty_details,
         "certifications": agent.certifications or [],
