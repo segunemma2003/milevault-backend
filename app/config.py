@@ -55,6 +55,21 @@ class Settings(BaseSettings):
     # Payment gateways
     PAYSTACK_SECRET_KEY: str = ""      # sk_live_xxx or sk_test_xxx
     PAYSTACK_PUBLIC_KEY: str = ""
+    # Paystack Dedicated Virtual Accounts: "wema-bank" or "titan-paystack" ("test-bank" in test mode)
+    PAYSTACK_DVA_PREFERRED_BANK: str = "wema-bank"
+
+    # Quidax (crypto sub-accounts, deposit addresses, withdrawals). Off until the key is set.
+    QUIDAX_SECRET_KEY: str = ""
+    QUIDAX_WEBHOOK_SECRET: str = ""
+    QUIDAX_BASE_URL: str = "https://www.quidax.com/api/v1"
+    # Coins/networks offered for deposits & withdrawals: "CURRENCY:network,..."
+    CRYPTO_RAILS: str = "USDT:trc20,USDT:bep20,USDC:bep20,BTC:btc,ETH:erc20"
+
+    # Withdrawals at or below this amount (per currency) are paid out automatically once the
+    # destination is usable; larger ones wait for admin approval. JSON; 0 / missing = always manual.
+    AUTO_PAYOUT_LIMITS: str = "{}"
+    # New payout destinations can't be used for this many hours after confirmation.
+    PAYOUT_DESTINATION_COOLDOWN_HOURS: int = 24
     STRIPE_SECRET_KEY: str = ""        # sk_live_xxx or sk_test_xxx
     STRIPE_WEBHOOK_SECRET: str = ""
     FLUTTERWAVE_SECRET_KEY: str = ""   # FLWSECK_xxx
@@ -70,6 +85,8 @@ class Settings(BaseSettings):
     # Admin
     ADMIN_EMAIL: str = "admin@milevault.com"
     ADMIN_SECRET: str = "change-this-admin-bootstrap-secret"
+    # Where contact-form tickets are emailed (Cloudflare Email Routing can forward it to Gmail).
+    SUPPORT_INBOX_EMAIL: str = "support@bondrova.com"
 
     # Rate limiting (requests per window)
     RATE_LIMIT_AUTH: str = "10/minute"

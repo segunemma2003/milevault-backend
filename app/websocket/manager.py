@@ -50,9 +50,14 @@ class ConnectionManager:
         Broadcast a message to all connections on this channel (local).
         Also publishes to Redis so other server instances receive it.
         """
-        data = json.dumps(message)
+        data = json.dumps(message, default=str)
+        # Deliver through Redis only: the subscriber (on every instance, including this one)
+        # forwards it to local sockets. Broadcasting locally as well delivered every message twice.
+        # Without Redis we fall back to local delivery.
+        if not await self._redis_publish(channel, data):
+            await self._broadcast_local(channel, data)
 
-        # Local broadcast
+    async def _broadcast_local(self, channel: str, data: str):
         dead: Set[WebSocket] = set()
         for ws in self._connections.get(channel, set()):
             try:
@@ -62,17 +67,16 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(ws, channel)
 
-        # Redis publish (fire-and-forget)
-        asyncio.create_task(self._redis_publish(channel, data))
-
-    async def _redis_publish(self, channel: str, data: str):
+    async def _redis_publish(self, channel: str, data: str) -> bool:
         try:
             r = await self._get_redis_async()
             if r:
                 await r.publish(f"ws:{channel}", data)
                 await r.aclose()
+                return True
         except Exception as e:
             logger.debug(f"Redis publish failed (degraded mode): {e}")
+        return False
 
     async def send_to_user(self, user_id: str, message: dict):
         """Send a direct notification to a specific user's personal channel."""
@@ -163,3 +167,31 @@ def build_transaction_event(event_type: str, transaction_id: str, payload: dict)
         "transaction_id": transaction_id,
         "data": payload,
     }
+
+
+def publish_channel_event(channel: str, event: dict) -> None:
+    """Sync publish to any channel (e.g. "transaction:<id>") — see publish_user_event."""
+    try:
+        import redis
+        from app.config import settings
+        r = redis.from_url(settings.REDIS_URL, socket_timeout=2, socket_connect_timeout=2)
+        r.publish(f"ws:{channel}", json.dumps(event, default=str))
+        r.close()
+    except Exception as e:
+        logger.debug(f"publish_channel_event failed (degraded mode): {e}")
+
+
+def publish_user_event(user_id: str, event: dict) -> None:
+    """
+    Push a real-time event to a user's personal channel from SYNC code (request handlers,
+    Celery tasks). Goes through Redis so it reaches whichever server holds their socket.
+    Best effort: if Redis is down the user still gets it on their next poll.
+    """
+    try:
+        import redis
+        from app.config import settings
+        r = redis.from_url(settings.REDIS_URL, socket_timeout=2, socket_connect_timeout=2)
+        r.publish(f"ws:user:{user_id}", json.dumps(event, default=str))
+        r.close()
+    except Exception as e:
+        logger.debug(f"publish_user_event failed (degraded mode): {e}")

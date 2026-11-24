@@ -555,72 +555,68 @@ async def paystack_webhook(
     if not x_paystack_signature or not paystack_verify_webhook(body, x_paystack_signature):
         raise HTTPException(status_code=401, detail="Invalid Paystack signature")
 
-    payload = await request.json()
-    event = payload.get("event")
+    import json as _json
+    import logging as _logging
+    from app.services import payment_flows
+
+    payload = _json.loads(body or b"{}")
+    event = payload.get("event") or ""
     data = payload.get("data") or {}
-    if event != "charge.success":
-        return {"ok": True, "ignored": event}
-
-    metadata = data.get("metadata") or {}
-    user_id = metadata.get("user_id")
-    if not user_id:
-        return {"ok": True, "ignored": "missing_user_id_metadata"}
-
     reference = data.get("reference")
-    if not reference:
-        return {"ok": True, "ignored": "missing_reference"}
+    log = _logging.getLogger("bondrova.webhooks")
 
-    amount_minor = int(data.get("amount") or 0)
-    amount = amount_minor / 100.0
-    currency = (data.get("currency") or "NGN").upper()
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        return {"ok": True, "ignored": "unknown_user"}
-    if user.wallet_frozen:
-        return {"ok": True, "ignored": "wallet_frozen"}
-
-    _apply_verified_deposit(
-        db=db,
-        user_id=user_id,
-        gateway="paystack",
-        reference=reference,
-        amount=amount,
-        currency=currency,
-    )
-    return {"ok": True}
+    # Every event is re-verified with Paystack's API inside the handlers (the body is only a hint),
+    # and every money movement is exactly-once, so Paystack's retries are harmless.
+    try:
+        if event == "charge.success" and reference:
+            outcome = payment_flows.handle_paystack_charge(db, reference, hint=data)
+        elif event in ("transfer.success", "transfer.failed", "transfer.reversed") and reference:
+            outcome = payment_flows.handle_paystack_transfer(db, reference)
+        elif event == "dedicatedaccount.assign.success":
+            from app.models.payments import VirtualAccount
+            cust = (data.get("customer") or {}).get("customer_code")
+            acct = data.get("dedicated_account") or {}
+            va = db.query(VirtualAccount).filter_by(provider="paystack", provider_customer_code=cust).first() if cust else None
+            if va:
+                va.account_number = acct.get("account_number") or va.account_number
+                va.account_name = acct.get("account_name") or va.account_name
+                va.bank_name = (acct.get("bank") or {}).get("name") or va.bank_name
+                va.status = "active" if va.account_number else va.status
+                db.commit()
+            outcome = "virtual_account_updated" if va else "virtual_account_unknown"
+        else:
+            outcome = "ignored"
+    except Exception as exc:
+        db.rollback()
+        log.error("Paystack webhook %s %s failed: %s", event, reference, exc)
+        # 500 → Paystack retries later; nothing was applied (single transaction).
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
+    log.warning("Paystack webhook %s %s → %s", event, reference, outcome)
+    return {"ok": True, "outcome": outcome}
 
 
 # ─── Withdrawal ───────────────────────────────────────────────────────────────
 
-@router.post("/withdraw")
-def withdraw(
-    payload: WithdrawRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Request a withdrawal. Funds are moved to pending_amount immediately.
-    Admin reviews and processes via the payment gateway.
-    """
+def check_withdrawal_allowed(db: Session, user: User, otp_code: Optional[str], *, ignore_cooldown: bool = False) -> None:
+    """Shared gate for every withdrawal path: frozen / blocked / KYC / cooldown / 2FA."""
     # Risk & fraud controls
-    if current_user.wallet_frozen:
+    if user.wallet_frozen:
         raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support@bondrova.com."})
-    if current_user.withdrawals_blocked:
+    if user.withdrawals_blocked:
         raise HTTPException(status_code=403, detail={"error": "WITHDRAWALS_BLOCKED", "message": "Withdrawals are currently blocked on your account. Contact support@bondrova.com."})
-    if not current_user.is_kyc_verified:
+    if not user.is_kyc_verified:
         raise HTTPException(status_code=403, detail={"error": "KYC_REQUIRED", "message": "Identity verification (KYC) is required before withdrawing funds."})
     from datetime import datetime
-    if current_user.withdrawal_cooldown_until and datetime.utcnow() < current_user.withdrawal_cooldown_until:
-        wait_until = current_user.withdrawal_cooldown_until.strftime("%Y-%m-%d %H:%M UTC")
+    if not ignore_cooldown and user.withdrawal_cooldown_until and datetime.utcnow() < user.withdrawal_cooldown_until:
+        wait_until = user.withdrawal_cooldown_until.strftime("%Y-%m-%d %H:%M UTC")
         raise HTTPException(status_code=429, detail={"error": "COOLDOWN_ACTIVE", "message": f"Withdrawal cooldown active. You can withdraw after {wait_until}."})
 
     from app.models.user import UserSettings
     import pyotp
 
-    us = db.query(UserSettings).filter(UserSettings.user_id == current_user.id).first()
+    us = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
     if us and us.two_factor_enabled:
-        if not payload.otp_code or not str(payload.otp_code).strip():
+        if not otp_code or not str(otp_code).strip():
             raise HTTPException(
                 status_code=403,
                 detail={
@@ -633,11 +629,26 @@ def withdraw(
                 status_code=503,
                 detail={"error": "TWO_FACTOR_MISCONFIGURED", "message": "Two-factor authentication is enabled but not set up correctly. Contact support."},
             )
-        if not pyotp.TOTP(us.two_factor_secret).verify(str(payload.otp_code).strip(), valid_window=1):
+        if not pyotp.TOTP(us.two_factor_secret).verify(str(otp_code).strip(), valid_window=1):
             raise HTTPException(
                 status_code=401,
                 detail={"error": "INVALID_OTP", "message": "Invalid or expired authentication code."},
             )
+
+
+
+
+@router.post("/withdraw")
+def withdraw(
+    payload: WithdrawRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Request a withdrawal. Funds are moved to pending_amount immediately.
+    Admin reviews and processes via the payment gateway.
+    """
+    check_withdrawal_allowed(db, current_user, payload.otp_code)
 
     if payload.amount <= 0:
         raise HTTPException(

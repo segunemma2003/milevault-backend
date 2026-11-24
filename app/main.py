@@ -24,7 +24,7 @@ from app.routers import (
     auth, users, transactions, wallet,
     disputes, messages, notifications, kyc, dashboard,
 )
-from app.routers import agents, admin, uploads, contact, content, admin_kyc
+from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments
 from app.routers.crypto import router as crypto_router, admin_router as crypto_admin_router
 
 logger = logging.getLogger("milevault")
@@ -175,6 +175,7 @@ app.include_router(admin.router, prefix=_V1)
 app.include_router(uploads.router, prefix=_V1)
 app.include_router(content.router, prefix=_V1)
 app.include_router(admin_kyc.router, prefix=_V1)
+app.include_router(payments.router, prefix=_V1)
 app.include_router(contact.router, prefix=_V1)
 app.include_router(crypto_router, prefix=_V1)
 app.include_router(crypto_admin_router, prefix=_V1)
@@ -182,8 +183,14 @@ app.include_router(crypto_admin_router, prefix=_V1)
 
 # ─── WebSocket endpoints ──────────────────────────────────────────────────────
 
-async def _authenticate_ws(token: str, db) -> User | None:
-    """Decode JWT from ?token= query param (cookies not available over WS)."""
+async def _authenticate_ws(token: str | None, db, websocket: WebSocket | None = None) -> User | None:
+    """
+    Auth for WebSockets: the HttpOnly access cookie (browsers send it on the WS handshake, so
+    this keeps working after a page refresh), or a ?token= query param as a fallback.
+    """
+    if not token and websocket is not None:
+        from app.routers.auth import ACCESS_COOKIE
+        token = websocket.cookies.get(ACCESS_COOKIE)
     if not token:
         return None
     payload = decode_token(token)
@@ -201,7 +208,7 @@ async def _authenticate_ws(token: str, db) -> User | None:
 async def transaction_ws(
     websocket: WebSocket,
     transaction_id: str,
-    token: str = Query(..., description="JWT access token"),
+    token: str | None = Query(None, description="JWT access token (optional — the login cookie is used if absent)"),
 ):
     """
     Real-time transaction chat channel.
@@ -213,7 +220,7 @@ async def transaction_ws(
 
     db = SessionLocal()
     try:
-        user = await _authenticate_ws(token, db)
+        user = await _authenticate_ws(token, db, websocket)
         if not user:
             await websocket.close(code=4001, reason="Unauthorized")
             return
@@ -255,15 +262,12 @@ async def transaction_ws(
                 event_type = data.get("type", "message")
 
                 if event_type == "message":
-                    from app.models.message import Message
-                    msg = Message(
-                        sender_id=user.id,
-                        transaction_id=transaction_id,
-                        content=data.get("content", "").strip()[:4000],
-                        message_type=data.get("message_type", "text"),
-                    )
-                    if not msg.content:
+                    # Legacy path (the web app now sends via POST /transactions/{id}/messages).
+                    from app.models.message import ChatMessage
+                    content = (data.get("content") or "").strip()[:4000]
+                    if not content:
                         continue
+                    msg = ChatMessage(sender_id=user.id, transaction_id=transaction_id, message=content, attachments=[])
                     db.add(msg)
                     db.commit()
                     db.refresh(msg)
@@ -291,7 +295,7 @@ async def transaction_ws(
 @app.websocket("/ws/notifications")
 async def notifications_ws(
     websocket: WebSocket,
-    token: str = Query(..., description="JWT access token"),
+    token: str | None = Query(None, description="JWT access token (optional — the login cookie is used if absent)"),
 ):
     """
     Personal notification channel for a user.
@@ -302,7 +306,7 @@ async def notifications_ws(
 
     db = SessionLocal()
     try:
-        user = await _authenticate_ws(token, db)
+        user = await _authenticate_ws(token, db, websocket)
         if not user:
             await websocket.close(code=4001, reason="Unauthorized")
             return

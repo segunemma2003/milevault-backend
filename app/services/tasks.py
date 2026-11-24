@@ -664,3 +664,15 @@ def reconcile_ledger(self) -> dict:
         return {"mismatches": len(mismatches), "negatives": len(negatives), "sample": mismatches[:10]}
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=1, name="app.services.tasks.poll_processing_payouts")
+def poll_processing_payouts(self) -> dict:
+    """Every 10 min: settle in-flight payouts whose webhook we may have missed."""
+    from app.database import SessionLocal
+    from app.services.payment_flows import poll_processing_payouts as _poll
+    db = SessionLocal()
+    try:
+        return _poll(db)
+    finally:
+        db.close()

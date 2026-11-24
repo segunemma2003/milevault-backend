@@ -44,6 +44,10 @@ celery_app.conf.update(
             "task": "app.services.tasks.cleanup_unverified_accounts",
             "schedule": crontab(minute="*/5"),
         },
+        "poll-processing-payouts-every-10min": {
+            "task": "app.services.tasks.poll_processing_payouts",
+            "schedule": crontab(minute="*/10"),
+        },
         "reconcile-ledger-nightly": {
             "task": "app.services.tasks.reconcile_ledger",
             "schedule": crontab(hour=2, minute=30),

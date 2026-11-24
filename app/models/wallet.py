@@ -52,6 +52,11 @@ class WalletTransaction(Base):
     method = Column(String(50), nullable=True)
     reference = Column(String(100), nullable=True)
     flagged_high_risk = Column(Boolean, default=False)  # admin queue: large amount / risk_score / dispute pattern
+    # Withdrawals to a saved destination (PayoutDestination). status: pending (awaiting approval)
+    # → processing (sent to provider) → completed | failed — completion only via provider webhook.
+    payout_destination_id = Column(String, nullable=True)
+    provider_payout_id = Column(String(120), nullable=True)
+    failure_reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

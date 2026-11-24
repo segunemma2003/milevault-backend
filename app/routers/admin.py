@@ -1408,6 +1408,19 @@ def approve_withdrawal(
             detail={"error": "INVALID_STATUS", "message": f"Withdrawal is already '{txn.status}'."},
         )
 
+    if getattr(txn, "payout_destination_id", None):
+        # Withdrawal to a saved, verified destination: approval SENDS it via Paystack/Quidax.
+        # It's marked completed only when the provider confirms (webhook or status poll).
+        from app.services import payment_flows
+        outcome = payment_flows.dispatch_payout(db, txn)
+        if outcome == "provider_rejected":
+            db.refresh(txn)
+            raise HTTPException(status_code=502, detail={
+                "error": "PAYOUT_REJECTED",
+                "message": txn.failure_reason or "The payment provider rejected this payout. Retry or reject it.",
+            })
+        return {"message": "Payout sent to the provider. It completes when they confirm.", "id": txn_id, "status": outcome}
+
     from app.services import ledger
     from app.services.ledger import InsufficientFunds
     try:

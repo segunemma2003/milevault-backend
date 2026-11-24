@@ -103,6 +103,9 @@ def send_chat_message(
     db.add(msg)
     db.commit()
     db.refresh(msg)
+    # Live delivery to everyone viewing this deal's chat (the API is the single write path).
+    from app.websocket.manager import build_chat_message_event, publish_channel_event
+    publish_channel_event(f"transaction:{transaction_id}", build_chat_message_event(msg))
     return msg_to_dict(msg)
 
 
@@ -135,7 +138,12 @@ def send_direct_message(
     db.add(msg)
     db.commit()
     db.refresh(msg)
-    return direct_msg_to_dict(msg)
+    out = direct_msg_to_dict(msg)
+    # Real-time delivery to the recipient (and the sender's other tabs).
+    from app.websocket.manager import publish_user_event
+    for uid in {str(payload.recipient_id), str(current_user.id)}:
+        publish_user_event(uid, {"type": "direct_message", "message": out})
+    return out
 
 
 @router.put("/messages/{message_id}/read")
