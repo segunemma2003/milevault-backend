@@ -38,7 +38,11 @@ FOLDER_MAP = {
     "transaction": "transaction_docs",
     "agent_evidence": "agent_evidence",
     "general": "general",
+    "blog": "blog_images",  # admin-only, publicly viewable
 }
+
+# Folders whose files may be viewed without logging in (via /uploads/public/...)
+PUBLIC_FOLDERS = ("avatars", "blog_images")
 
 
 @router.post("/presign", summary="Get a presigned S3 URL for direct browser upload")
@@ -60,6 +64,8 @@ def get_presign(
       - method: 's3' or 'local'
     """
     mapped_folder = FOLDER_MAP.get(folder, "general")
+    if mapped_folder == "blog_images" and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail={"error": "FORBIDDEN", "message": "Only admins can upload blog images."})
 
     if content_type not in (ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES | ALLOWED_DOCUMENT_TYPES):
         raise HTTPException(
@@ -111,6 +117,10 @@ def confirm_upload(
     Called by the client after a successful S3 direct upload.
     Queues the Celery watermark task for images and videos.
     """
+    if _is_public_key(s3_key):
+        # Avatars and blog images are brand/display assets — never watermark them.
+        return {"message": "Upload confirmed.", "s3_key": s3_key}
+
     if content_type in ALLOWED_IMAGE_TYPES:
         from app.services.tasks import watermark_image
         task = watermark_image.delay(s3_key, str(current_user.id))
@@ -144,10 +154,15 @@ def get_download_url(
     return {"url": url, "expires_in_seconds": settings.S3_PRESIGNED_EXPIRY}
 
 
+def _is_public_key(s3_key: str) -> bool:
+    return ".." not in s3_key and any(f"/{f}/" in f"/{s3_key}" for f in PUBLIC_FOLDERS)
+
+
+@router.get("/public/{s3_key:path}", include_in_schema=False)
 @router.get("/avatar/{s3_key:path}", include_in_schema=False)
-def view_avatar(s3_key: str):
-    """Public, cacheable redirect to a short-lived presigned URL for an avatar image."""
-    if ".." in s3_key or "/avatars/" not in f"/{s3_key}":
+def view_public_file(s3_key: str):
+    """Stable public link (avatars, blog images) → redirect to a short-lived presigned URL."""
+    if not _is_public_key(s3_key):
         raise HTTPException(status_code=404, detail="Not found")
     resp = RedirectResponse(get_presigned_view_url(s3_key), status_code=307)
     resp.headers["Cache-Control"] = "private, max-age=1800"
