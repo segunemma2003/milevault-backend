@@ -24,7 +24,7 @@ from app.routers import (
     auth, users, transactions, wallet,
     disputes, messages, notifications, kyc, dashboard,
 )
-from app.routers import agents, admin, uploads, contact, content
+from app.routers import agents, admin, uploads, contact, content, admin_kyc
 from app.routers.crypto import router as crypto_router, admin_router as crypto_admin_router
 
 logger = logging.getLogger("milevault")
@@ -174,6 +174,7 @@ app.include_router(agents.router, prefix=_V1)
 app.include_router(admin.router, prefix=_V1)
 app.include_router(uploads.router, prefix=_V1)
 app.include_router(content.router, prefix=_V1)
+app.include_router(admin_kyc.router, prefix=_V1)
 app.include_router(contact.router, prefix=_V1)
 app.include_router(crypto_router, prefix=_V1)
 app.include_router(crypto_admin_router, prefix=_V1)
