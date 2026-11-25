@@ -28,6 +28,9 @@ from app.services.s3_service import (
 )
 from app.config import settings
 
+import logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
 FOLDER_MAP = {
@@ -121,15 +124,22 @@ def confirm_upload(
         # Avatars and blog images are brand/display assets — never watermark them.
         return {"message": "Upload confirmed.", "s3_key": s3_key}
 
-    if content_type in ALLOWED_IMAGE_TYPES:
-        from app.services.tasks import watermark_image
-        task = watermark_image.delay(s3_key, str(current_user.id))
-        return {"message": "Image upload confirmed. Watermarking queued.", "task_id": task.id, "s3_key": s3_key}
+    # Only the uploader can confirm their own file (keys are issued as <prefix><folder>/<user_id>/...).
+    if f"/{current_user.id}/" not in s3_key or ".." in s3_key:
+        raise HTTPException(status_code=403, detail={"error": "FORBIDDEN", "message": "Not your upload."})
 
-    if content_type in ALLOWED_VIDEO_TYPES:
-        from app.services.tasks import watermark_video
-        task = watermark_video.delay(s3_key, str(current_user.id))
-        return {"message": "Video upload confirmed. Watermarking queued (may take a few minutes).", "task_id": task.id, "s3_key": s3_key}
+    # Watermarking is best-effort: the file is already safely in storage, so a busy or
+    # unreachable background queue must never make the upload itself fail.
+    task_name = ("watermark_image" if content_type in ALLOWED_IMAGE_TYPES
+                 else "watermark_video" if content_type in ALLOWED_VIDEO_TYPES else None)
+    if task_name:
+        try:
+            from app.services import tasks
+            task = getattr(tasks, task_name).delay(s3_key, str(current_user.id))
+            return {"message": "Upload confirmed. Watermarking queued.", "task_id": task.id, "s3_key": s3_key}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not queue %s for %s: %r", task_name, s3_key, e)
+            return {"message": "Upload confirmed.", "s3_key": s3_key, "watermark_queued": False}
 
     return {"message": "Upload confirmed.", "s3_key": s3_key}
 

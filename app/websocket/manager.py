@@ -126,6 +126,11 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _attachments_view(items) -> list:
+    from app.routers.messages import attachments_view
+    return attachments_view(items)
+
+
 def build_chat_message_event(message_obj) -> dict:
     sender = getattr(message_obj, "sender", None)
     sender_name = (
@@ -143,7 +148,7 @@ def build_chat_message_event(message_obj) -> dict:
             "content": content,
             "message_type": getattr(message_obj, "message_type", "text"),
             "created_at": message_obj.created_at.isoformat(),
-            "attachments": getattr(message_obj, "attachments", None) or [],
+            "attachments": _attachments_view(getattr(message_obj, "attachments", None)),
         },
     }
 

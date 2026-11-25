@@ -15,6 +15,30 @@ from app.dependencies import get_current_user
 
 router = APIRouter(tags=["messages"])
 
+IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp"}
+
+
+def attachment_view(item) -> dict:
+    """A stored attachment (the storage key) as something the chat can show: a short-lived link,
+    a display name and whether it is an image (rendered inline) or a document (opened)."""
+    from app.services.s3_service import get_presigned_view_url
+    if isinstance(item, dict):  # already expanded (or a legacy object)
+        key = item.get("key") or item.get("s3_key") or ""
+        name = item.get("name")
+    else:
+        key, name = str(item or ""), None
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+    try:
+        url = get_presigned_view_url(key) if key else ""
+    except Exception:  # noqa: BLE001 — a broken link must not break the whole chat
+        url = ""
+    return {"key": key, "name": name or f"Attachment.{ext or 'file'}", "url": url,
+            "type": "image" if ext in IMAGE_EXTS else "document"}
+
+
+def attachments_view(items) -> list:
+    return [attachment_view(i) for i in (items or [])]
+
 
 def msg_to_dict(m: ChatMessage) -> dict:
     return {
@@ -33,7 +57,7 @@ def msg_to_dict(m: ChatMessage) -> dict:
             "created_at": m.sender.created_at,
         } if m.sender else None,
         "message": m.message,
-        "attachments": m.attachments or [],
+        "attachments": attachments_view(m.attachments),
         "created_at": m.created_at,
     }
 
@@ -94,11 +118,22 @@ def send_chat_message(
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # Attachments are storage keys the sender uploaded for a deal ("transaction" folder). Anything
+    # else is refused: the chat hands out view links for these keys, so accepting a foreign key
+    # would let someone read another user's file.
+    from app.services.s3_service import owns_key
+    attachments = []
+    for item in payload.attachments or []:
+        key = item.get("key") if isinstance(item, dict) else item
+        if not isinstance(key, str) or not owns_key(key, "transaction_docs", str(current_user.id)):
+            raise HTTPException(status_code=400, detail="Invalid attachment.")
+        attachments.append(key)
+
     msg = ChatMessage(
         transaction_id=transaction_id,
         sender_id=current_user.id,
         message=payload.message,
-        attachments=payload.attachments or [],
+        attachments=attachments,
     )
     db.add(msg)
     db.commit()

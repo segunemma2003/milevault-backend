@@ -1,0 +1,12 @@
+# Local env files must never ship in the image: pydantic would read them and a stale
+# local value (e.g. CELERY_BROKER_URL=redis://localhost) silently beats the derived one.
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uploads/
+.git/
