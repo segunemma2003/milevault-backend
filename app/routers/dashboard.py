@@ -12,72 +12,81 @@ from app.dependencies import get_current_user
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
+FINAL_STATUSES = ("completed", "cancelled", "refunded", "declined", "expired")
+AWAITING_RESPONSE = ("pending_approval", "pending_acceptance")
+
+
 @router.get("/stats")
 def get_dashboard_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """
+    Dashboard summary. Money per currency (the app converts to the viewer's display currency):
+      available — free to use or withdraw
+      in_escrow — your money locked in deals you're paying for (buyer)
+      incoming  — money held in escrow for you in deals you're delivering (seller)
+      pending   — withdrawals on their way out
+    """
+    from app.models.transaction import Milestone
     user_id = current_user.id
+    mine = (Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)
 
-    total = db.query(Transaction).filter(
-        (Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)
-    ).count()
+    total = db.query(Transaction).filter(mine).count()
+    active = db.query(Transaction).filter(mine, Transaction.status.notin_(FINAL_STATUSES + AWAITING_RESPONSE)).count()
+    completed = db.query(Transaction).filter(mine, Transaction.status == "completed").count()
+    pending_approval = db.query(Transaction).filter(mine, Transaction.status.in_(AWAITING_RESPONSE)).count()
+    paused = db.query(Transaction).filter(mine, Transaction.status == "awaiting_funding").count()
 
-    active_statuses = ["approved", "in_progress", "pending_approval"]
-    active = db.query(Transaction).filter(
-        ((Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)),
-        Transaction.status.in_(active_statuses),
-    ).count()
-
-    completed = db.query(Transaction).filter(
-        ((Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)),
-        Transaction.status == "completed",
-    ).count()
-
-    pending_approval = db.query(Transaction).filter(
-        ((Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)),
-        Transaction.status == "pending_approval",
-    ).count()
-
-    total_disputes = db.query(Dispute).filter(Dispute.raised_by == user_id).count()
+    open_disputes = (
+        db.query(Dispute).join(Transaction, Dispute.transaction_id == Transaction.id)
+        .filter(mine, Dispute.status.in_(("open", "in_review"))).count()
+    )
 
     balances = db.query(WalletBalance).filter(WalletBalance.user_id == user_id).all()
     wallet_balance = [
-        {"currency": b.currency, "amount": b.amount}
+        {"currency": b.currency, "amount": float(b.amount or 0), "escrow": float(b.escrow_amount or 0),
+         "pending": float(b.pending_amount or 0)}
         for b in balances
     ]
+
+    # Held for this user as a seller: escrowed on open milestones of their deals (price only —
+    # the buyer's fee share isn't theirs).
+    incoming: dict = {}
+    rows = (
+        db.query(Milestone, Transaction.currency)
+        .join(Transaction, Milestone.transaction_id == Transaction.id)
+        .filter(Transaction.seller_id == user_id, Milestone.status != "completed",
+                Transaction.status.notin_(FINAL_STATUSES), Milestone.funded_amount > 0)
+        .all()
+    )
+    for m, tx_cur in rows:
+        cur = (m.currency or tx_cur or "USD").upper()
+        held = min(float(m.funded_amount or 0), float(m.amount or 0)) - float(m.seller_fee or 0) * (1 if m.is_funded else 0)
+        incoming[cur] = round(incoming.get(cur, 0.0) + max(held, 0.0), 2)
 
     pending_withdrawals = db.query(WalletTransaction).filter(
         WalletTransaction.user_id == user_id,
         WalletTransaction.type == "withdrawal",
-        WalletTransaction.status == "pending",
+        WalletTransaction.status.in_(("pending", "processing")),
     ).count()
 
-    usd_balance = next((b.amount for b in balances if b.currency == "USD"), 0.0)
+    usd_balance = next((float(b.amount or 0) for b in balances if b.currency == "USD"), 0.0)
 
-    # Get recent transactions
-    recent_txns = db.query(Transaction).filter(
-        (Transaction.buyer_id == user_id) | (Transaction.seller_id == user_id)
-    ).order_by(Transaction.updated_at.desc()).limit(5).all()
-
-    recent = []
-    for tx in recent_txns:
-        recent.append({
-            "id": tx.id,
-            "title": tx.title,
-            "status": tx.status,
-            "amount": tx.amount,
-            "currency": tx.currency,
-            "updated_at": tx.updated_at,
-        })
+    recent_txns = db.query(Transaction).filter(mine).order_by(Transaction.updated_at.desc()).limit(5).all()
+    recent = [{"id": tx.id, "title": tx.title, "status": tx.status, "amount": tx.amount,
+               "currency": tx.currency, "updated_at": tx.updated_at} for tx in recent_txns]
 
     return {
         "total_transactions": total,
         "active_transactions": active,
         "completed_transactions": completed,
         "pending_approval": pending_approval,
-        "total_disputes": total_disputes,
+        "paused_transactions": paused,
+        "open_disputes": open_disputes,
+        "total_disputes": open_disputes,  # kept for older clients
         "wallet_balance": wallet_balance,
+        "incoming_escrow": [{"currency": c, "amount": a} for c, a in incoming.items()],
         "pending_withdrawals": pending_withdrawals,
         "available_to_withdraw": usd_balance,
         "recent_transactions": recent,

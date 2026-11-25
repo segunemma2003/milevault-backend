@@ -265,3 +265,16 @@ def test_dispute_fee_is_paid_by_whoever_opens_it(db):
     deposit(db, s, "NGN", 10000)                                 # only naira: charged ₦7,500 at 1,500
     disputes.create_dispute(DisputeCreate(**body), s, db)
     assert avail(db, s, "NGN")[0] == Decimal("2500") and platform_revenue(db, "NGN") == Decimal("7500")
+
+
+def test_dashboard_stats_show_escrow_and_incoming(db):
+    from app.routers.dashboard import get_dashboard_stats
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m1, m2) = deal(db, b, s, 100, [("Design", 40), ("Build", 60)])
+    deposit(db, b, "USD", 150)
+    T.fund_milestone(tx.id, m1.id, FundMilestoneBody(), b, db)
+    sb = get_dashboard_stats(b, db)
+    usd = next(x for x in sb["wallet_balance"] if x["currency"] == "USD")
+    assert (usd["amount"], usd["escrow"]) == (110.0, 40.0) and sb["active_transactions"] == 1
+    ss = get_dashboard_stats(s, db)
+    assert ss["incoming_escrow"] == [{"currency": "USD", "amount": 40.0}] and ss["active_transactions"] == 1
