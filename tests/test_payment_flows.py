@@ -38,6 +38,7 @@ def db(monkeypatch):
     monkeypatch.setattr(settings, "PAYSTACK_SECRET_KEY", "sk_test_x")
     monkeypatch.setattr(settings, "QUIDAX_SECRET_KEY", "qx_test")
     monkeypatch.setattr(settings, "AUTO_PAYOUT_LIMITS", "{}")
+    monkeypatch.setattr(settings, "NGN_PAYMENT_RAIL", "paystack")  # PayHub tests opt in explicitly
     monkeypatch.setattr(payment_flows, "create_notification", lambda *a, **k: None)
     s = sessionmaker(bind=engine)()
     yield s
@@ -260,3 +261,106 @@ def test_small_withdrawal_auto_dispatches(db, monkeypatch):
     db.expire_all()
     assert db.get(WalletTransaction, small.id).status == "processing"
     assert db.get(WalletTransaction, big.id).status == "pending"   # over the limit → admin approval
+
+
+
+# ─── PayHub rail (central gateway) ────────────────────────────────────────────
+
+from app.services import payhub  # noqa: E402
+
+
+@pytest.fixture()
+def on_payhub(monkeypatch):
+    monkeypatch.setattr(settings, "NGN_PAYMENT_RAIL", "payhub")
+    monkeypatch.setattr(settings, "PAYHUB_API_KEY", "sk_test_bondrova")
+    monkeypatch.setattr(settings, "PAYHUB_PASS_FEE_TO_PAYER", True)
+    monkeypatch.setattr(payhub, "list_banks", lambda: [{"code": "058", "name": "GTBank"}])
+
+
+def test_payhub_deposit_credits_full_amount_once(db, on_payhub, monkeypatch):
+    u = user(db)
+    monkeypatch.setattr(payhub, "fee_quote", lambda amt: {"amount": Decimal("10000"), "fee": Decimal("101.01"), "total": Decimal("10101.01")})
+    made = {}
+    monkeypatch.setattr(payhub, "create_charge", lambda **k: made.update(k) or {
+        "reference": "phb_1", "checkout_url": "https://checkout/phb_1", "status": "pending", "amount": k["amount"], "currency": "NGN"})
+    out = payment_flows.start_naira_deposit(db, u, 10000)
+    assert out["checkout_url"] and made["amount"] == Decimal("10101.01")          # payer covers the fee
+    assert made["metadata"]["user_id"] == u.id and "/dashboard/payouts" in made["redirect_url"]
+
+    monkeypatch.setattr(payhub, "get_charge", lambda ref: {"reference": ref, "status": "success",
+                                                         "amount": Decimal("10101.01"), "currency": "NGN"})
+    assert payment_flows.handle_payhub_charge(db, "phb_1") == "credited"
+    assert payment_flows.handle_payhub_charge(db, "phb_1") == "duplicate"         # webhook + return page
+    assert avail(db, u, "NGN")[0] == Decimal("10000")                              # full amount credited
+
+
+def test_payhub_underpaid_or_failed_charge_credits_nothing(db, on_payhub, monkeypatch):
+    u = user(db)
+    monkeypatch.setattr(payhub, "fee_quote", lambda amt: {"amount": Decimal(amt), "fee": Decimal("0"), "total": Decimal(amt)})
+    monkeypatch.setattr(payhub, "create_charge", lambda **k: {"reference": "phb_2", "checkout_url": "x", "status": "pending",
+                                                              "amount": k["amount"], "currency": "NGN"})
+    payment_flows.start_naira_deposit(db, u, 5000)
+    monkeypatch.setattr(payhub, "get_charge", lambda ref: {"reference": ref, "status": "success", "amount": Decimal("10"), "currency": "NGN"})
+    assert payment_flows.handle_payhub_charge(db, "phb_2") == "amount_mismatch"
+    assert avail(db, u, "NGN")[0] == Decimal(0)
+
+
+def test_payhub_bank_payout_cycle(db, on_payhub, monkeypatch):
+    u = user(db, "Ada", "Obi")
+    ledger.credit(db, user_id=u.id, currency="NGN", amount="20000", reference_type="t")
+    db.commit()
+    monkeypatch.setattr(payhub, "register_bank_account", lambda **k: {"id": "ba_1", "status": "verified",
+                                                                      "account_name": "OBI ADA C", "error": None})
+    dest, token = payment_flows.add_bank_destination(db, u, bank_code="058", account_number="0123456789", label=None)
+    assert dest.provider_recipient_code == "ba_1" and dest.bank_name == "GTBank"
+    db.commit()
+    payment_flows.confirm_destination(db, token)
+    dest.usable_from = datetime.utcnow() - timedelta(minutes=1)
+    db.commit()
+
+    txn = payment_flows.create_withdrawal(db, u, destination_id=dest.id, amount=7500)
+    sent = []
+    monkeypatch.setattr(payhub, "request_payout", lambda **k: sent.append(k) or {"id": "po_1", "status": "processing", "failure_reason": None})
+    assert payment_flows.dispatch_payout(db, txn) == "processing"
+    assert sent[0]["client_reference"] == str(txn.id) and sent[0]["bank_account_id"] == "ba_1"
+
+    monkeypatch.setattr(payhub, "get_payout", lambda pid: {"id": pid, "status": "completed", "client_reference": str(txn.id),
+                                                          "failure_reason": None, "amount": Decimal("7500")})
+    assert payment_flows.handle_payhub_payout(db, "po_1") == "completed"
+    assert payment_flows.handle_payhub_payout(db, "po_1") == "already_completed"
+    assert avail(db, u, "NGN") == (Decimal("12500"), Decimal("0"))
+
+
+def test_payhub_rejected_payout_returns_funds(db, on_payhub, monkeypatch):
+    u = user(db)
+    ledger.credit(db, user_id=u.id, currency="NGN", amount="5000", reference_type="t")
+    db.commit()
+    monkeypatch.setattr(payhub, "register_bank_account", lambda **k: {"id": "ba_2", "status": "verified", "account_name": "OBI ADA", "error": None})
+    dest, token = payment_flows.add_bank_destination(db, u, bank_code="058", account_number="0123456789", label=None)
+    db.commit()
+    payment_flows.confirm_destination(db, token)
+    dest.usable_from = datetime.utcnow() - timedelta(minutes=1)
+    db.commit()
+    txn = payment_flows.create_withdrawal(db, u, destination_id=dest.id, amount=5000)
+    monkeypatch.setattr(payhub, "request_payout", lambda **k: {"id": "po_2", "status": "failed", "failure_reason": "Insufficient float"})
+    assert payment_flows.dispatch_payout(db, txn) == "failed"
+    assert avail(db, u, "NGN") == (Decimal("5000"), Decimal("0"))
+
+
+def test_payhub_bank_name_mismatch_rejected(db, on_payhub, monkeypatch):
+    u = user(db, "Ada", "Obi")
+    monkeypatch.setattr(payhub, "register_bank_account", lambda **k: {"id": "ba_3", "status": "verified", "account_name": "JOHN STRANGER", "error": None})
+    with pytest.raises(FlowError) as e:
+        payment_flows.add_bank_destination(db, u, bank_code="058", account_number="0123456789", label=None)
+    assert e.value.code == "NAME_MISMATCH"
+
+
+def test_payhub_webhook_signature(monkeypatch):
+    import hashlib, hmac, time as _t
+    monkeypatch.setattr(settings, "PAYHUB_WEBHOOK_SECRET", "whsec_test")
+    body = b'{"type":"charge.succeeded"}'
+    t = int(_t.time())
+    sig = hmac.new(b"whsec_test", f"{t}.".encode() + body, hashlib.sha256).hexdigest()
+    assert payhub.verify_webhook(body, f"t={t},v1={sig}")
+    assert not payhub.verify_webhook(body, f"t={t},v1={'0' * 64}")
+    assert not payhub.verify_webhook(body, f"t={t - 3600},v1={sig}")  # stale

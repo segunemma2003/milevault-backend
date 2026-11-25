@@ -26,7 +26,7 @@ from app.config import settings
 from app.models.payments import PayoutDestination, ProviderCustomer, UserDepositAddress, VirtualAccount
 from app.models.user import User
 from app.models.wallet import WalletTransaction
-from app.services import ledger, paystack_rails, quidax
+from app.services import ledger, payhub, paystack_rails, quidax
 from app.services.notification_service import create_notification
 
 logger = logging.getLogger("bondrova.payments")
@@ -79,6 +79,22 @@ def auto_payout_limit(currency: str) -> Decimal:
         return ledger.to_decimal(limits.get(currency.upper(), 0))
     except (ValueError, TypeError):
         return Decimal(0)
+
+
+def ngn_rail() -> str:
+    """Which gateway carries naira: "payhub" (central gateway) or "paystack" (direct)."""
+    return (settings.NGN_PAYMENT_RAIL or "payhub").strip().lower()
+
+
+def ngn_enabled() -> bool:
+    return payhub.enabled() if ngn_rail() == "payhub" else paystack_rails.enabled()
+
+
+def ngn_banks() -> list[dict]:
+    try:
+        return payhub.list_banks() if ngn_rail() == "payhub" else paystack_rails.list_banks()
+    except Exception:
+        return []
 
 
 def _provider_customer(db: Session, user_id: str, provider: str) -> Optional[ProviderCustomer]:
@@ -163,6 +179,73 @@ def ensure_deposit_address(db: Session, user: User, currency: str, network: str)
         raise FlowError("DEPOSIT_ADDRESS_FAILED", f"Couldn't create your {currency} address: {exc}", 502)
     db.commit()
     return row
+
+
+MIN_NGN_DEPOSIT = Decimal("100")
+
+
+def start_naira_deposit(db: Session, user: User, amount) -> dict:
+    """PayHub checkout: card or bank transfer. Credited when PayHub confirms (webhook or return page)."""
+    _require_kyc(user)
+    if ngn_rail() != "payhub":
+        raise FlowError("WRONG_RAIL", "Use your dedicated bank account to deposit naira.", 409)
+    if not payhub.enabled():
+        raise FlowError("PROVIDER_NOT_CONFIGURED", "Naira deposits are not available yet.", 503)
+    credit = ledger.quantize(amount, "NGN", db)
+    if credit < MIN_NGN_DEPOSIT:
+        raise FlowError("AMOUNT_TOO_SMALL", f"The minimum deposit is NGN {MIN_NGN_DEPOSIT}.", 422)
+    try:
+        total = payhub.fee_quote(credit)["total"] if settings.PAYHUB_PASS_FEE_TO_PAYER else credit
+        client_ref = "dep-" + secrets.token_hex(8)
+        charge = payhub.create_charge(
+            amount=total, customer_email=user.email, client_reference=client_ref,
+            redirect_url=f"{settings.FRONTEND_URL.rstrip('/')}/dashboard/payouts?deposit=return",
+            description=f"Bondrova wallet deposit · NGN {credit}",
+            metadata={"user_id": str(user.id), "credit_amount": str(credit), "app": "bondrova"},
+        )
+    except (payhub.PayHubError, httpx.HTTPError) as exc:
+        raise FlowError("DEPOSIT_START_FAILED", f"Couldn't start the payment: {exc}", 502)
+    db.add(WalletTransaction(user_id=user.id, type="deposit", amount=float(credit), currency="NGN",
+                             status="pending", method="payhub", reference=charge["reference"],
+                             description=f"Deposit via card/bank transfer (pays NGN {total} incl. fee)"))
+    db.commit()
+    return {"reference": charge["reference"], "checkout_url": charge["checkout_url"],
+            "credit_amount": str(credit), "total": str(total), "fee": str(total - credit)}
+
+
+def handle_payhub_charge(db: Session, reference: str) -> str:
+    """Settle a PayHub charge we started. PayHub's API is the source of truth; credit exactly once."""
+    txn = db.query(WalletTransaction).filter(WalletTransaction.reference == reference,
+                                             WalletTransaction.type == "deposit",
+                                             WalletTransaction.method == "payhub").with_for_update().first()
+    if not txn:
+        logger.error("PayHub charge %s has no matching Bondrova deposit", reference)
+        return "unmatched"
+    if txn.status == "completed":
+        return "duplicate"
+    c = payhub.get_charge(reference)
+    if c["status"] == "success":
+        if c["amount"] < ledger.to_decimal(txn.amount):
+            logger.error("PayHub charge %s amount %s < expected credit %s", reference, c["amount"], txn.amount)
+            txn.status, txn.flagged_high_risk = "failed", True
+            db.commit()
+            return "amount_mismatch"
+        credited = ledger.credit(db, user_id=txn.user_id, currency="NGN", amount=txn.amount, to_bucket="available",
+                                 reference_type="deposit:payhub", reference_id=reference,
+                                 description=f"Deposit {reference}", idempotency_key=reference)
+        if not credited:
+            db.rollback()
+            return "duplicate"
+        txn.status = "completed"
+        create_notification(db, txn.user_id, "Deposit received",
+                            f"NGN {ledger.quantize(txn.amount, 'NGN', db)} has been added to your wallet.", "payment")
+        db.commit()
+        return "credited"
+    if c["status"] == "failed":
+        txn.status = "failed"
+        db.commit()
+        return "failed"
+    return f"not_final:{c['status']}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -266,20 +349,30 @@ def add_bank_destination(db: Session, user: User, *, bank_code: str, account_num
     account_number = re.sub(r"\D", "", account_number or "")
     if len(account_number) != 10:
         raise FlowError("INVALID_ACCOUNT", "Enter a valid 10-digit account number.", 422)
-    if not paystack_rails.enabled():
+    if not ngn_enabled():
         raise FlowError("PROVIDER_NOT_CONFIGURED", "Bank payouts are not available yet.", 503)
+    banks = {b["code"]: b["name"] for b in ngn_banks()}
+    payhub_account_id = None
     try:
-        resolved = paystack_rails.resolve_account(account_number=account_number, bank_code=bank_code)
-    except (paystack_rails.PaystackError, httpx.HTTPError) as exc:
+        if ngn_rail() == "payhub":
+            acct = payhub.register_bank_account(bank_code=bank_code, bank_name=banks.get(bank_code) or bank_code,
+                                                account_number=account_number, external_ref=str(user.id))
+            if acct["status"] != "verified" or not acct["account_name"]:
+                raise FlowError("ACCOUNT_LOOKUP_FAILED",
+                                f"We couldn't verify that account: {acct.get('error') or 'not found'}", 422)
+            resolved, payhub_account_id = acct["account_name"], acct["id"]
+        else:
+            resolved = paystack_rails.resolve_account(account_number=account_number, bank_code=bank_code)
+    except (paystack_rails.PaystackError, payhub.PayHubError, httpx.HTTPError) as exc:
         raise FlowError("ACCOUNT_LOOKUP_FAILED", f"We couldn't verify that account: {exc}", 422)
     if not names_match(user.first_name, user.last_name, resolved):
         raise FlowError("NAME_MISMATCH",
                         f"This account belongs to '{resolved}', which doesn't match your verified name. "
                         "You can only withdraw to an account in your own name.", 422)
-    banks = {b["code"]: b["name"] for b in _safe_banks()}
     dest = PayoutDestination(user_id=user.id, kind="bank", currency="NGN", label=label,
                              bank_code=bank_code, bank_name=banks.get(bank_code), account_number=account_number,
-                             account_name=resolved, status="pending_confirmation")
+                             account_name=resolved, status="pending_confirmation",
+                             provider_recipient_code=payhub_account_id)
     db.add(dest)
     db.flush()
     return dest, _new_confirmation(dest)
@@ -376,7 +469,7 @@ def create_withdrawal(db: Session, user: User, *, destination_id: str, amount) -
 
 
 def _provider_for(dest: PayoutDestination) -> str:
-    return "paystack" if dest.kind == "bank" else "quidax"
+    return ngn_rail() if dest.kind == "bank" else "quidax"
 
 
 def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
@@ -389,7 +482,19 @@ def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
         raise FlowError("DESTINATION_NOT_FOUND", "Withdrawal destination not found.", 404)
     reference = str(txn.id)
     try:
-        if dest.kind == "bank":
+        if dest.kind == "bank" and ngn_rail() == "payhub":
+            if not dest.provider_recipient_code:
+                acct = payhub.register_bank_account(bank_code=dest.bank_code, bank_name=dest.bank_name or dest.bank_code,
+                                                    account_number=dest.account_number, external_ref=str(txn.user_id))
+                dest.provider_recipient_code = acct["id"]
+            res = payhub.request_payout(bank_account_id=dest.provider_recipient_code, amount=txn.amount,
+                                        client_reference=reference)
+            txn.provider_payout_id = res["id"]
+            if res["status"] in payhub.PAYOUT_FAILED:
+                db.commit()
+                return settle_payout(db, reference, success=False,
+                                     reason=res.get("failure_reason") or "Payout was refused by the gateway")
+        elif dest.kind == "bank":
             if not dest.provider_recipient_code:
                 dest.provider_recipient_code = paystack_rails.create_recipient(
                     name=dest.account_name, account_number=dest.account_number, bank_code=dest.bank_code)
@@ -411,7 +516,7 @@ def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
         txn.failure_reason = "Provider timeout — awaiting status check"
         db.commit()
         return "processing_unknown"
-    except (paystack_rails.PaystackError, quidax.QuidaxError, httpx.HTTPError) as exc:
+    except (paystack_rails.PaystackError, payhub.PayHubError, quidax.QuidaxError, httpx.HTTPError) as exc:
         # Provider explicitly refused: stays pending for an admin to retry or reject.
         db.rollback()
         txn = db.query(WalletTransaction).filter(WalletTransaction.id == reference).one()
@@ -458,6 +563,21 @@ def handle_paystack_transfer(db: Session, reference: str) -> str:
     return f"not_final:{t['status']}"
 
 
+def handle_payhub_payout(db: Session, payout_id: str) -> str:
+    p = payhub.get_payout(payout_id)
+    withdrawal_id = p.get("client_reference")
+    if not withdrawal_id:
+        txn = db.query(WalletTransaction).filter(WalletTransaction.provider_payout_id == payout_id).first()
+        withdrawal_id = str(txn.id) if txn else None
+    if not withdrawal_id:
+        return "unmatched"
+    if p["status"] in payhub.PAYOUT_DONE:
+        return settle_payout(db, withdrawal_id, success=True)
+    if p["status"] in payhub.PAYOUT_FAILED:
+        return settle_payout(db, withdrawal_id, success=False, reason=p.get("failure_reason") or "Bank payout failed")
+    return f"not_final:{p['status']}"
+
+
 def handle_quidax_withdrawal(db: Session, reference: str) -> str:
     if reference.startswith("sweep-"):
         return "sweep"
@@ -480,8 +600,12 @@ def poll_processing_payouts(db: Session) -> dict:
         if not dest:
             continue
         try:
-            res = (handle_paystack_transfer(db, str(txn.id)) if dest.kind == "bank"
-                   else handle_quidax_withdrawal(db, str(txn.id)))
+            if dest.kind == "bank" and ngn_rail() == "payhub":
+                res = handle_payhub_payout(db, txn.provider_payout_id) if txn.provider_payout_id else "no_payout_id"
+            elif dest.kind == "bank":
+                res = handle_paystack_transfer(db, str(txn.id))
+            else:
+                res = handle_quidax_withdrawal(db, str(txn.id))
             if res in ("completed", "failed"):
                 out["settled"] += 1
         except Exception as exc:

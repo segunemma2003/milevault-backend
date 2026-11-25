@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     # Paystack Dedicated Virtual Accounts: "wema-bank" or "titan-paystack" ("test-bank" in test mode)
     PAYSTACK_DVA_PREFERRED_BANK: str = "wema-bank"
 
+    # Naira rail: "payhub" (central gateway — one webhook for all products) or "paystack" (direct).
+    NGN_PAYMENT_RAIL: str = "payhub"
+    PAYHUB_BASE_URL: str = "https://payhub.compasse.net/api/v1"
+    PAYHUB_API_KEY: str = ""          # Bondrova's company key from PayHub (sk_live_… / sk_test_…)
+    PAYHUB_WEBHOOK_SECRET: str = ""   # whsec_… returned when Bondrova's webhook URL is registered
+    PAYHUB_PROVIDER: str = "paystack" # bank list / account resolution provider inside PayHub
+    PAYHUB_PASS_FEE_TO_PAYER: bool = True  # payer covers PayHub's service fee; full amount is credited
+
     # Quidax (crypto sub-accounts, deposit addresses, withdrawals). Off until the key is set.
     QUIDAX_SECRET_KEY: str = ""
     QUIDAX_WEBHOOK_SECRET: str = ""

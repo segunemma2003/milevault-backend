@@ -29,7 +29,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.payments import PayoutDestination, UserDepositAddress, VirtualAccount
 from app.models.user import User
-from app.services import paystack_rails, payment_flows, quidax
+from app.services import payhub, paystack_rails, payment_flows, quidax
 from app.services.payment_flows import FlowError
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -70,7 +70,8 @@ def rails(current_user: User = Depends(get_current_user), db: Session = Depends(
     addrs = db.query(UserDepositAddress).filter_by(user_id=current_user.id).all()
     return {
         "kyc_verified": bool(current_user.is_kyc_verified),
-        "bank_deposits_enabled": paystack_rails.enabled(),
+        "ngn_rail": payment_flows.ngn_rail(),
+        "bank_deposits_enabled": payment_flows.ngn_enabled(),
         "crypto_enabled": quidax.enabled(),
         "crypto_rails": [{"currency": c, "network": n} for c, n in quidax.rails()],
         "virtual_account": _va_out(va),
@@ -103,12 +104,54 @@ def create_deposit_address(body: AddressRequest, current_user: User = Depends(ge
 
 @router.get("/banks")
 def banks(current_user: User = Depends(get_current_user)):
-    if not paystack_rails.enabled():
+    if not payment_flows.ngn_enabled():
         return []
+    rows = payment_flows.ngn_banks()
+    if not rows:
+        raise HTTPException(status_code=502, detail={"error": "BANKS_UNAVAILABLE", "message": "Bank list is unavailable right now."})
+    return rows
+
+
+class NairaDepositRequest(BaseModel):
+    amount: float
+
+
+@router.post("/deposit/naira")
+def start_naira_deposit(body: NairaDepositRequest, current_user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """Returns a checkout URL (card or bank transfer). The wallet is credited when PayHub confirms."""
+    if current_user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen."})
     try:
-        return paystack_rails.list_banks()
+        return payment_flows.start_naira_deposit(db, current_user, body.amount)
+    except FlowError as e:
+        _raise(e)
+
+
+class ConfirmDepositRequest(BaseModel):
+    reference: str
+
+
+@router.post("/deposit/confirm")
+def confirm_naira_deposit(body: ConfirmDepositRequest, current_user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """Called by the return page after checkout. Safe to repeat; the webhook usually gets there first."""
+    from app.models.wallet import WalletTransaction
+    txn = db.query(WalletTransaction).filter(WalletTransaction.reference == body.reference,
+                                             WalletTransaction.user_id == current_user.id,
+                                             WalletTransaction.type == "deposit").first()
+    if not txn:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Deposit not found."})
+    if txn.status in ("completed", "failed"):
+        return {"status": txn.status, "amount": txn.amount}
+    try:
+        outcome = payment_flows.handle_payhub_charge(db, body.reference)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail={"error": "BANKS_UNAVAILABLE", "message": str(exc)})
+        db.rollback()
+        log.warning("deposit confirm %s: %s", body.reference, exc)
+        outcome = "pending"
+    db.refresh(txn)
+    return {"status": txn.status, "amount": txn.amount, "outcome": outcome}
 
 
 # ─── Destinations (address book) ──────────────────────────────────────────────
@@ -239,6 +282,36 @@ def withdraw(body: WithdrawToDestinationRequest, current_user: User = Depends(ge
         "message": ("Your withdrawal is on its way." if txn.status == "processing"
                     else "Withdrawal requested. It will be reviewed and sent shortly."),
     }
+
+
+# ─── PayHub webhook (all naira events for Bondrova, forwarded by the central gateway) ──
+
+@router.post("/webhooks/payhub")
+async def payhub_webhook(request: Request, db: Session = Depends(get_db),
+                         x_payhub_signature: Optional[str] = Header(default=None),
+                         x_payhub_event: Optional[str] = Header(default=None)):
+    raw = await request.body()
+    if not payhub.verify_webhook(raw, x_payhub_signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    event = (payload.get("type") or x_payhub_event or "").lower()
+    data = payload.get("data") or {}
+    try:
+        if event.startswith("charge.") and data.get("reference"):
+            outcome = payment_flows.handle_payhub_charge(db, data["reference"])
+        elif event in ("payout.completed", "payout.failed", "payout.rejected") and data.get("id"):
+            outcome = payment_flows.handle_payhub_payout(db, data["id"])
+        else:
+            outcome = "ignored"
+    except Exception as exc:
+        db.rollback()
+        log.error("PayHub webhook %s failed: %s", event, exc)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")  # PayHub retries
+    log.warning("PayHub webhook %s %s → %s", event, payload.get("id"), outcome)
+    return {"ok": True, "outcome": outcome}
 
 
 # ─── Quidax webhook ───────────────────────────────────────────────────────────
