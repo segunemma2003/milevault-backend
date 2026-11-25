@@ -1,3 +1,4 @@
+import re
 import logging
 from pathlib import Path
 
@@ -39,6 +40,26 @@ def _incremental_schema_statements() -> list[str]:
     return [s.strip() for s in clean.split(";") if s.strip()]
 
 
+_ADD_COLUMN = re.compile(r'\s*ALTER\s+TABLE\s+"?(\w+)"?\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"?(\w+)"?', re.I)
+
+
+def _run_ddl(stmt: str, attempts: int = 4) -> None:
+    """Run one DDL statement without ever hanging startup: wait at most 5s for its table lock,
+    then retry (another container's transaction usually finishes within seconds)."""
+    import time
+    for i in range(attempts):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+                conn.execute(text(stmt))
+            return
+        except Exception as exc:
+            if "lock timeout" not in str(exc).lower() or i == attempts - 1:
+                raise
+            _schema_log.warning("Schema: table busy, retrying (%s/%s): %s", i + 1, attempts, stmt[:120])
+            time.sleep(2)
+
+
 def create_tables():
     from app.models import user, transaction, wallet, dispute, message, kyc, notification  # noqa
     from app.models import agent, currency, crypto  # noqa
@@ -51,13 +72,21 @@ def create_tables():
     if engine.dialect.name != "postgresql":
         return
     stmts = _incremental_schema_statements()
+    with engine.connect() as conn:
+        existing = {(r[0], r[1]) for r in conn.execute(text(
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()"))}
     # One transaction per statement: if a late CREATE fails, PostgreSQL must not roll back
     # earlier ALTER ADD COLUMN (e.g. transactions.funding_deadline).
     for stmt in stmts:
         head = stmt.lstrip()[:20].upper()
+        m = _ADD_COLUMN.match(stmt)
+        if m and (m.group(1).lower(), m.group(2).lower()) in existing:
+            # Already there. Skipping matters: even "ADD COLUMN IF NOT EXISTS" takes an ACCESS
+            # EXCLUSIVE lock, and waiting for it behind the previous container's open
+            # transactions froze startup past Railway's health check.
+            continue
         try:
-            with engine.begin() as conn:
-                conn.execute(text(stmt))
+            _run_ddl(stmt)
         except Exception as exc:
             if head.startswith("CREATE TABLE") or head.startswith("CREATE INDEX"):
                 _schema_log.warning(

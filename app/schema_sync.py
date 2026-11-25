@@ -40,6 +40,7 @@ def apply_missing_columns_from_metadata(engine: Engine, base: Any, log: logging.
     for stmt in iter_missing_column_statements(engine, base):
         try:
             with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '5s'"))  # never hang startup on a busy table
                 conn.execute(text(stmt))
         except Exception as exc:
             log.warning("ORM column apply skip: %s | %s", exc, stmt[:220])
