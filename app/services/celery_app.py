@@ -54,3 +54,5 @@ celery_app.conf.update(
         },
     },
 )
+
+import app.services.notification_dispatch  # noqa: E402,F401  (after-commit delivery for task notifications)

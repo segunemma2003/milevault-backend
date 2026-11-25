@@ -21,13 +21,5 @@ def create_notification(
     )
     db.add(notification)
     db.commit()
-    # Real-time push to the user's open tabs (falls back to polling if Redis is unavailable).
-    from app.websocket.manager import publish_user_event
-    publish_user_event(str(user_id), {
-        "type": "notification",
-        "notification": {
-            "id": str(notification.id), "title": title, "message": message, "type": type,
-            "related_item_id": related_item_id, "related_item_type": related_item_type,
-        },
-    })
+    # Live push + email happen after commit in app/services/notification_dispatch.py
     return notification

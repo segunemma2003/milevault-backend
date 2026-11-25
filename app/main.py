@@ -25,6 +25,7 @@ from app.routers import (
     disputes, messages, notifications, kyc, dashboard,
 )
 from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments
+import app.services.notification_dispatch  # noqa: F401  (registers after-commit delivery)
 from app.routers.crypto import router as crypto_router, admin_router as crypto_admin_router
 
 logger = logging.getLogger("milevault")
