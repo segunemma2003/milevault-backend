@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     PAYHUB_BASE_URL: str = "https://payhub.compasse.net/api/v1"
     PAYHUB_API_KEY: str = ""          # Bondrova's company key from PayHub (sk_live_… / sk_test_…)
     PAYHUB_WEBHOOK_SECRET: str = ""   # whsec_… returned when Bondrova's webhook URL is registered
-    PAYHUB_PROVIDER: str = "paystack" # bank list / account resolution provider inside PayHub
+    # Provider inside PayHub for BOTH Bondrova deposits and payouts — must be the same so payouts
+    # are paid from the balance deposits land in. Match PayHub's "Take payments with" setting.
+    PAYHUB_PROVIDER: str = "flutterwave"
     PAYHUB_PASS_FEE_TO_PAYER: bool = True  # payer covers PayHub's service fee; full amount is credited
 
     # Quidax (crypto sub-accounts, deposit addresses, withdrawals). Off until the key is set.

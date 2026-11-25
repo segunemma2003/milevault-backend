@@ -56,7 +56,9 @@ def create_charge(*, amount, customer_email: str, client_reference: str, redirec
                   description: str, metadata: Optional[dict] = None) -> Dict[str, Any]:
     md = dict(metadata or {})
     md["redirect_url"] = redirect_url
+    # Pin the provider: deposits must land in the same provider balance that payouts are paid from.
     c = _request("POST", "/charges", json={
+        "provider": settings.PAYHUB_PROVIDER,
         "amount": str(amount), "customer_email": customer_email, "description": description,
         "client_reference": client_reference, "metadata": md,
     })
