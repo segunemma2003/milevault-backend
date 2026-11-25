@@ -73,6 +73,16 @@ def liveness_challenge(current_user: User = Depends(get_current_user)):
     return issue_liveness_challenge(str(current_user.id))
 
 
+def _owner_view_url(file_url: str):
+    if file_url and file_url.startswith("s3:"):
+        try:
+            from app.services.s3_service import get_presigned_view_url
+            return get_presigned_view_url(file_url[3:], expires=900)
+        except Exception:
+            return None
+    return None
+
+
 @router.get("/status")
 def get_kyc_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     docs = db.query(KycDocument).filter(KycDocument.user_id == current_user.id).all()
@@ -88,6 +98,9 @@ def get_kyc_status(current_user: User = Depends(get_current_user), db: Session =
             "status": d.status,
             "rejection_reason": d.rejection_reason,
             "created_at": d.created_at,
+            "reviewed_at": d.reviewed_at,
+            # Short-lived link so the owner can see exactly what they submitted.
+            "view_url": _owner_view_url(d.file_url),
         }
         for d in docs
     ]
