@@ -16,6 +16,8 @@ class KycDocument(Base):
     file_name = Column(String(255), nullable=True)
     status = Column(String(20), default="pending")  # pending | verified | rejected
     rejection_reason = Column(Text, nullable=True)
+    # Live face check: the challenge the person was asked to perform (shown to the reviewer).
+    notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

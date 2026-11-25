@@ -42,7 +42,7 @@ def test_confirm_succeeds_even_when_the_queue_is_down(db, monkeypatch):
     def boom(*a, **k):
         raise ConnectionError("Error 111 connecting to localhost:6379. Connection refused.")
     monkeypatch.setattr(tasks.watermark_image, "delay", boom)
-    key = f"{s3_service.key_prefix()}kyc_documents/{u.id}/abc.png"
+    key = f"{s3_service.key_prefix()}transaction_docs/{u.id}/abc.png"
     out = uploads.confirm_upload(s3_key=key, content_type="image/png", current_user=u)
     assert out["s3_key"] == key and out["watermark_queued"] is False
 
@@ -78,3 +78,46 @@ def test_chat_attachments_must_be_the_senders_and_come_back_viewable(db, monkeyp
     # Seller reading the thread gets the same viewable attachments.
     thread = messages.get_chat_messages(tx.id, seller, db)
     assert thread[0]["attachments"][0]["url"].startswith("https://files.test/")
+
+
+# ─── Live face check ──────────────────────────────────────────────────────────
+
+def test_liveness_challenge_is_signed_per_user_and_expires(db, monkeypatch):
+    from app.routers import kyc
+    u, other = user(db, "a@x.com"), user(db, "b@x.com")
+    ch = kyc.issue_liveness_challenge(u.id)
+    assert len(ch["actions"]) == 3 and len(ch["code"]) == 4
+    data = kyc.read_liveness_challenge(ch["token"], u.id)
+    assert data["a"] == ch["actions"] and data["c"] == ch["code"]
+    with pytest.raises(HTTPException):
+        kyc.read_liveness_challenge(ch["token"], other.id)          # someone else's
+    body, sig = ch["token"].rsplit(".", 1)
+    with pytest.raises(HTTPException):
+        kyc.read_liveness_challenge(body + "." + "0" * len(sig), u.id)  # forged
+    import time as _t
+    monkeypatch.setattr(_t, "time", lambda: 10 ** 10)
+    with pytest.raises(HTTPException):
+        kyc.read_liveness_challenge(ch["token"], u.id)              # expired
+
+
+def test_kyc_needs_the_face_check_for_new_verifications(db):
+    from app.models.kyc import KycDocument
+    from app.routers.admin_kyc import _recompute
+    u = user(db, "a@x.com")
+    for t in ("passport", "address_proof"):
+        db.add(KycDocument(user_id=u.id, type=t, file_url="s3:k", status="verified"))
+    db.commit()
+    assert _recompute(db, u) != "verified" and not u.is_kyc_verified
+    db.add(KycDocument(user_id=u.id, type="liveness", file_url="s3:v.webm", status="verified"))
+    db.commit()
+    assert _recompute(db, u) == "verified" and u.is_kyc_verified
+
+
+def test_kyc_files_are_never_watermarked(db, monkeypatch):
+    u = user(db, "a@x.com")
+    from app.services import tasks
+    called = []
+    monkeypatch.setattr(tasks.watermark_video, "delay", lambda *a, **k: called.append(a))
+    key = f"{s3_service.key_prefix()}kyc_documents/{u.id}/face.webm"
+    out = uploads.confirm_upload(s3_key=key, content_type="video/webm", current_user=u)
+    assert out["s3_key"] == key and not called

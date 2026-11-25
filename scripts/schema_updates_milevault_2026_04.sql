@@ -81,3 +81,6 @@ ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS admin_payout_approved_by VAR
 
 -- Role-specific admins (super / finance / support)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_role VARCHAR(20);
+
+-- Live face check: challenge shown to the KYC reviewer
+ALTER TABLE kyc_documents ADD COLUMN IF NOT EXISTS notes TEXT;

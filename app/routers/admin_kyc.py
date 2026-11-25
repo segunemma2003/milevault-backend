@@ -30,11 +30,19 @@ def _view_url(file_url: str) -> Optional[str]:
     return None
 
 
+LIVENESS_DOC = "liveness"
+
+
+def _complete(types_verified: set) -> bool:
+    """ID + proof of address + the live face check (new verifications need all three)."""
+    return bool(types_verified & REQUIRED_DOCS) and ADDRESS_DOC in types_verified and LIVENESS_DOC in types_verified
+
+
 def _overall(docs: list) -> str:
     types_verified = {d.type for d in docs if d.status == "verified"}
     if any(d.status == "rejected" for d in docs):
         return "rejected"
-    if types_verified & REQUIRED_DOCS and ADDRESS_DOC in types_verified:
+    if _complete(types_verified):
         return "verified"
     if any(d.status == "pending" for d in docs):
         return "pending"
@@ -42,10 +50,11 @@ def _overall(docs: list) -> str:
 
 
 def _recompute(db: Session, user: User) -> str:
-    """Mark the user verified once one identity document AND proof of address are approved."""
+    """Mark the user verified once an identity document, proof of address AND the live face check
+    are approved. (People verified before the face check existed stay verified.)"""
     docs = db.query(KycDocument).filter(KycDocument.user_id == user.id).all()
     types_verified = {d.type for d in docs if d.status == "verified"}
-    should_verify = bool(types_verified & REQUIRED_DOCS) and ADDRESS_DOC in types_verified
+    should_verify = _complete(types_verified)
     if should_verify and not user.is_kyc_verified:
         user.is_kyc_verified = True
         _notify(db, user.id, "Identity Verified",
@@ -93,6 +102,7 @@ def list_submissions(
                     "created_at": d.created_at,
                     "reviewed_at": d.reviewed_at,
                     "view_url": _view_url(d.file_url),
+                    "notes": d.notes,
                 }
                 for d in udocs
             ],

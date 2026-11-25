@@ -24,6 +24,53 @@ async def _read_upload_request(request: Request):
 REQUIRED_DOCS = {"id_card", "passport", "drivers_license"}
 ADDRESS_DOC = "address_proof"
 SELFIE_DOC = "selfie"
+LIVENESS_DOC = "liveness"
+
+# ─── Live face check (no third party) ─────────────────────────────────────────
+# The server picks random actions + a code to read aloud and signs them; the browser records a
+# short live video of the person doing exactly that; a KYC reviewer watches it against the
+# challenge and the ID photo. A pre-recorded video can't match a challenge it has never seen.
+LIVENESS_ACTIONS = ["Turn your head to the left", "Turn your head to the right", "Look up", "Look down",
+                    "Smile", "Blink twice", "Raise your eyebrows", "Move closer to the camera"]
+LIVENESS_TTL_SECONDS = 15 * 60
+
+
+def _sign(payload: str) -> str:
+    import hashlib, hmac
+    return hmac.new(settings.SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def issue_liveness_challenge(user_id: str) -> dict:
+    import base64, json, secrets, time
+    rng = secrets.SystemRandom()
+    actions = rng.sample(LIVENESS_ACTIONS, 3)
+    code = "".join(rng.choice("123456789") for _ in range(4))
+    body = base64.urlsafe_b64encode(json.dumps({"u": user_id, "a": actions, "c": code, "t": int(time.time())},
+                                               separators=(",", ":")).encode()).decode()
+    return {"token": f"{body}.{_sign(body)}", "actions": actions, "code": code,
+            "expires_in": LIVENESS_TTL_SECONDS}
+
+
+def read_liveness_challenge(token: str, user_id: str) -> dict:
+    """The signed challenge, if it's genuine, this user's, and fresh. Raises 400 otherwise."""
+    import base64, hmac, json, time
+    try:
+        body, sig = (token or "").rsplit(".", 1)
+        if not hmac.compare_digest(sig, _sign(body)):
+            raise ValueError("bad signature")
+        data = json.loads(base64.urlsafe_b64decode(body.encode()))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid face-check challenge. Please start the check again.")
+    if data.get("u") != user_id:
+        raise HTTPException(status_code=400, detail="This face-check challenge belongs to another account.")
+    if time.time() - int(data.get("t", 0)) > LIVENESS_TTL_SECONDS:
+        raise HTTPException(status_code=400, detail="The face-check challenge expired. Please start again.")
+    return data
+
+
+@router.get("/liveness/challenge", summary="Get a random live face-check challenge")
+def liveness_challenge(current_user: User = Depends(get_current_user)):
+    return issue_liveness_challenge(str(current_user.id))
 
 
 @router.get("/status")
@@ -47,10 +94,11 @@ def get_kyc_status(current_user: User = Depends(get_current_user), db: Session =
 
     has_identity = bool(doc_types_submitted & REQUIRED_DOCS)
     has_address = ADDRESS_DOC in doc_types_submitted
+    has_liveness = LIVENESS_DOC in doc_types_submitted
 
     if not has_identity and not has_address:
         overall_status = "incomplete"
-    elif all(d.status == "verified" for d in docs) and has_identity and has_address:
+    elif all(d.status == "verified" for d in docs) and has_identity and has_address and (has_liveness or current_user.is_kyc_verified):
         overall_status = "verified"
     elif any(d.status == "rejected" for d in docs):
         overall_status = "rejected"
@@ -75,7 +123,7 @@ async def upload_kyc_document(
     """Accepts JSON {doc_type, s3_key, filename} (file already in the bucket) or multipart doc_type + file."""
     from app.services.s3_service import owns_key, put_bytes, _build_s3_key
 
-    valid_types = {"id_card", "passport", "drivers_license", "address_proof", "selfie"}
+    valid_types = {"id_card", "passport", "drivers_license", "address_proof", "selfie", LIVENESS_DOC}
     allowed_content_types = {"image/jpeg", "image/png", "application/pdf"}
     kind, data = await _read_upload_request(request)
     doc_type = str(data.get("doc_type") or "")
@@ -87,6 +135,8 @@ async def upload_kyc_document(
         if not owns_key(s3_key, "kyc_documents", str(current_user.id)):
             raise HTTPException(status_code=400, detail="Invalid upload key")
         original_name = str(data.get("filename") or s3_key.rsplit("/", 1)[-1])[:255]
+    elif doc_type == LIVENESS_DOC:
+        raise HTTPException(status_code=400, detail="The live face check must be recorded in the app.")
     else:
         file = data.get("file")
         if file is None or not hasattr(file, "read"):
@@ -99,6 +149,14 @@ async def upload_kyc_document(
         original_name = file.filename or "document"
         s3_key = _build_s3_key("kyc_documents", original_name, str(current_user.id))
         put_bytes(s3_key, content, file.content_type)
+
+    notes = None
+    if doc_type == LIVENESS_DOC:
+        ext = s3_key.rsplit(".", 1)[-1].lower()
+        if ext not in ("webm", "mp4", "mov"):
+            raise HTTPException(status_code=400, detail="The live face check must be a video recording.")
+        ch = read_liveness_challenge(str(data.get("challenge_token") or ""), str(current_user.id))
+        notes = f"Asked to: {' → '.join(ch['a'])} · then read aloud the code {' '.join(ch['c'])}"
 
     # Remove existing doc of same type if any
     existing = db.query(KycDocument).filter(
@@ -114,6 +172,7 @@ async def upload_kyc_document(
         file_url=f"s3:{s3_key}",
         file_name=original_name,
         status="pending",
+        notes=notes,
     )
     db.add(doc)
     db.commit()

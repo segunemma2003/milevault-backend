@@ -120,13 +120,14 @@ def confirm_upload(
     Called by the client after a successful S3 direct upload.
     Queues the Celery watermark task for images and videos.
     """
-    if _is_public_key(s3_key):
-        # Avatars and blog images are brand/display assets — never watermark them.
-        return {"message": "Upload confirmed.", "s3_key": s3_key}
-
     # Only the uploader can confirm their own file (keys are issued as <prefix><folder>/<user_id>/...).
     if f"/{current_user.id}/" not in s3_key or ".." in s3_key:
         raise HTTPException(status_code=403, detail={"error": "FORBIDDEN", "message": "Not your upload."})
+
+    if _is_public_key(s3_key) or "/kyc_documents/" in f"/{s3_key}":
+        # Avatars and blog images are brand assets; KYC files (IDs, the live face-check video) are
+        # identity evidence and must stay exactly as recorded — never watermark/re-encode them.
+        return {"message": "Upload confirmed.", "s3_key": s3_key}
 
     # Watermarking is best-effort: the file is already safely in storage, so a busy or
     # unreachable background queue must never make the upload itself fail.
