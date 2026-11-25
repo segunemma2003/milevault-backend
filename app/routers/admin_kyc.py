@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_admin
+from app.dependencies import get_current_admin, require_admin
 from app.models.kyc import KycDocument
 from app.models.notification import Notification
 from app.models.user import User
@@ -57,7 +57,7 @@ def _recompute(db: Session, user: User) -> str:
 def list_submissions(
     status: str = "pending",  # pending | verified | rejected | all
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("support")),
 ):
     docs = db.query(KycDocument).order_by(KycDocument.created_at.desc()).all()
     by_user: dict = {}
@@ -109,7 +109,7 @@ def _get_doc(db: Session, doc_id: str) -> KycDocument:
 
 
 @router.put("/documents/{doc_id}/approve", summary="Approve a KYC document")
-def approve_document(doc_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def approve_document(doc_id: str, db: Session = Depends(get_db), _: User = Depends(require_admin("support"))):
     doc = _get_doc(db, doc_id)
     doc.status = "verified"
     doc.rejection_reason = None
@@ -125,7 +125,7 @@ def reject_document(
     doc_id: str,
     reason: str = Body(..., embed=True, min_length=3, max_length=500),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("support")),
 ):
     doc = _get_doc(db, doc_id)
     doc.status = "rejected"
@@ -145,7 +145,7 @@ def revoke_verification(
     user_id: str,
     reason: str = Body(..., embed=True, min_length=3, max_length=500),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("support")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:

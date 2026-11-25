@@ -15,6 +15,7 @@ class UserOut(BaseModel):
     is_active: bool
     is_email_verified: bool
     is_admin: bool = False
+    admin_role: Optional[str] = None
     is_agent: bool = False
     phone: Optional[str] = None
     location: Optional[str] = None

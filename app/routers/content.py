@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_admin
+from app.dependencies import get_current_admin, require_admin
 from app.models.content import BlogPost, JobOpening
 from app.models.user import User
 
@@ -164,12 +164,12 @@ def sitemap(db: Session = Depends(get_db)):
 # ─── Admin: blog ──────────────────────────────────────────────────────────────
 
 @router.get("/admin/blog", summary="All blog posts (admin)")
-def admin_list_posts(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_list_posts(db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     return [_post_out(p, full=False) for p in db.query(BlogPost).order_by(BlogPost.created_at.desc()).all()]
 
 
 @router.get("/admin/blog/{post_id}", summary="Get blog post (admin)")
-def admin_get_post(post_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_get_post(post_id: str, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     p = db.get(BlogPost, post_id)
     if not p:
         raise HTTPException(status_code=404, detail="Post not found")
@@ -190,7 +190,7 @@ def _apply_post(db: Session, p: BlogPost, data: BlogPostIn) -> None:
 
 
 @router.post("/admin/blog", status_code=status.HTTP_201_CREATED, summary="Create blog post (admin)")
-def admin_create_post(data: BlogPostIn, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_create_post(data: BlogPostIn, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     p = BlogPost(is_published=False)
     _apply_post(db, p, data)
     db.add(p)
@@ -200,7 +200,7 @@ def admin_create_post(data: BlogPostIn, db: Session = Depends(get_db), _: User =
 
 
 @router.put("/admin/blog/{post_id}", summary="Update blog post (admin)")
-def admin_update_post(post_id: str, data: BlogPostIn, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_update_post(post_id: str, data: BlogPostIn, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     p = db.get(BlogPost, post_id)
     if not p:
         raise HTTPException(status_code=404, detail="Post not found")
@@ -211,7 +211,7 @@ def admin_update_post(post_id: str, data: BlogPostIn, db: Session = Depends(get_
 
 
 @router.delete("/admin/blog/{post_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete blog post (admin)")
-def admin_delete_post(post_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_delete_post(post_id: str, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     p = db.get(BlogPost, post_id)
     if p:
         db.delete(p)
@@ -221,7 +221,7 @@ def admin_delete_post(post_id: str, db: Session = Depends(get_db), _: User = Dep
 # ─── Admin: careers ───────────────────────────────────────────────────────────
 
 @router.get("/admin/careers", summary="All job openings (admin)")
-def admin_list_jobs(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_list_jobs(db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     return [_job_out(j) for j in db.query(JobOpening).order_by(JobOpening.created_at.desc()).all()]
 
 
@@ -231,7 +231,7 @@ def _apply_job(j: JobOpening, data: JobOpeningIn) -> None:
 
 
 @router.post("/admin/careers", status_code=status.HTTP_201_CREATED, summary="Create job opening (admin)")
-def admin_create_job(data: JobOpeningIn, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_create_job(data: JobOpeningIn, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     j = JobOpening()
     _apply_job(j, data)
     db.add(j)
@@ -241,7 +241,7 @@ def admin_create_job(data: JobOpeningIn, db: Session = Depends(get_db), _: User 
 
 
 @router.put("/admin/careers/{job_id}", summary="Update job opening (admin)")
-def admin_update_job(job_id: str, data: JobOpeningIn, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_update_job(job_id: str, data: JobOpeningIn, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     j = db.get(JobOpening, job_id)
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -252,7 +252,7 @@ def admin_update_job(job_id: str, data: JobOpeningIn, db: Session = Depends(get_
 
 
 @router.delete("/admin/careers/{job_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete job opening (admin)")
-def admin_delete_job(job_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def admin_delete_job(job_id: str, db: Session = Depends(get_db), _: User = Depends(require_admin("content"))):
     j = db.get(JobOpening, job_id)
     if j:
         db.delete(j)

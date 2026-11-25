@@ -24,7 +24,7 @@ from app.routers import (
     auth, users, transactions, wallet,
     disputes, messages, notifications, kyc, dashboard,
 )
-from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments
+from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments, admin_team
 import app.services.notification_dispatch  # noqa: F401  (registers after-commit delivery)
 from app.routers.crypto import router as crypto_router, admin_router as crypto_admin_router
 
@@ -176,6 +176,7 @@ app.include_router(admin.router, prefix=_V1)
 app.include_router(uploads.router, prefix=_V1)
 app.include_router(content.router, prefix=_V1)
 app.include_router(admin_kyc.router, prefix=_V1)
+app.include_router(admin_team.router, prefix=_V1)
 app.include_router(payments.router, prefix=_V1)
 app.include_router(contact.router, prefix=_V1)
 app.include_router(crypto_router, prefix=_V1)

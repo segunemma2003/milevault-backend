@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_admin
+from app.dependencies import get_current_user, get_current_admin, require_admin
 from app.models.user import User
 from app.models.crypto import CryptoDepositAddress, CryptoPendingDeposit, UserCryptoAddress, NETWORK_LABELS, NETWORK_CURRENCIES
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
@@ -191,7 +191,7 @@ def notify_deposit(
 @admin_router.get("/deposit-addresses")
 def admin_list_deposit_addresses(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     rows = db.query(CryptoDepositAddress).all()
     return [
@@ -217,7 +217,7 @@ def admin_set_deposit_address(
     min_confirmations: int = Body(1),
     is_active: bool = Body(True),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     network = network.lower().strip()
     if network not in SUPPORTED_NETWORKS:
@@ -256,7 +256,7 @@ def admin_set_deposit_address(
 def admin_delete_deposit_address(
     network: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     row = db.query(CryptoDepositAddress).filter(CryptoDepositAddress.network == network).first()
     if not row:
@@ -270,7 +270,7 @@ def admin_delete_deposit_address(
 def admin_list_pending_deposits(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     q = db.query(CryptoPendingDeposit)
     if status:
@@ -311,7 +311,7 @@ def admin_approve_deposit(
     fiat_currency: str = Body("NGN"),
     notes: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     """Credit user wallet with the fiat equivalent of the crypto deposit."""
     deposit = db.query(CryptoPendingDeposit).filter(CryptoPendingDeposit.id == deposit_id).first()
@@ -373,7 +373,7 @@ def admin_reject_deposit(
     reason: str = Body(...),
     user_id: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     deposit = db.query(CryptoPendingDeposit).filter(CryptoPendingDeposit.id == deposit_id).first()
     if not deposit:
@@ -402,7 +402,7 @@ def admin_reject_deposit(
 def admin_list_crypto_withdrawals(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     """Crypto withdrawal requests, filterable by status."""
     q = db.query(WalletTransaction).filter(
@@ -448,7 +448,7 @@ def admin_approve_crypto_withdrawal(
     txn_id: str,
     body: _WithdrawalApproveBody = Body(default=_WithdrawalApproveBody()),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     """Mark withdrawal as processed. Funds were sent manually to user's crypto address."""
     # Row lock: approve and reject on the same withdrawal serialise; the loser sees it's no longer pending.
@@ -496,7 +496,7 @@ def admin_reject_crypto_withdrawal(
     txn_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     # Row lock: approve and reject on the same withdrawal serialise; the loser sees it's no longer pending.
     txn = db.query(WalletTransaction).filter(

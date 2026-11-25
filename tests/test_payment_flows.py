@@ -37,7 +37,6 @@ def db(monkeypatch):
     Base.metadata.create_all(engine)
     monkeypatch.setattr(settings, "PAYSTACK_SECRET_KEY", "sk_test_x")
     monkeypatch.setattr(settings, "QUIDAX_SECRET_KEY", "qx_test")
-    monkeypatch.setattr(settings, "AUTO_PAYOUT_LIMITS", "{}")
     monkeypatch.setattr(settings, "NGN_PAYMENT_RAIL", "paystack")  # PayHub tests opt in explicitly
     monkeypatch.setattr(payment_flows, "create_notification", lambda *a, **k: None)
     s = sessionmaker(bind=engine)()
@@ -249,8 +248,7 @@ def test_payout_timeout_is_not_retried_blindly(db, monkeypatch):
     assert avail(db, u, "USDT") == (Decimal("5"), Decimal("0"))
 
 
-def test_small_withdrawal_auto_dispatches(db, monkeypatch):
-    monkeypatch.setattr(settings, "AUTO_PAYOUT_LIMITS", '{"USDT": 100}')
+def test_every_withdrawal_waits_for_admin_approval(db, monkeypatch):
     u = user(db)
     ledger.credit(db, user_id=u.id, currency="USDT", amount="300", reference_type="t")
     db.commit()
@@ -259,8 +257,8 @@ def test_small_withdrawal_auto_dispatches(db, monkeypatch):
     small = payment_flows.create_withdrawal(db, u, destination_id=dest.id, amount=100)
     big = payment_flows.create_withdrawal(db, u, destination_id=dest.id, amount=150)
     db.expire_all()
-    assert db.get(WalletTransaction, small.id).status == "processing"
-    assert db.get(WalletTransaction, big.id).status == "pending"   # over the limit → admin approval
+    assert db.get(WalletTransaction, small.id).status == "pending"  # even small ones: nothing is sent
+    assert db.get(WalletTransaction, big.id).status == "pending"    # until an admin approves
 
 
 

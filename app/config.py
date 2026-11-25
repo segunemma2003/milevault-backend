@@ -77,7 +77,6 @@ class Settings(BaseSettings):
 
     # Withdrawals at or below this amount (per currency) are paid out automatically once the
     # destination is usable; larger ones wait for admin approval. JSON; 0 / missing = always manual.
-    AUTO_PAYOUT_LIMITS: str = "{}"
     # New payout destinations can't be used for this many hours after confirmation.
     PAYOUT_DESTINATION_COOLDOWN_HOURS: int = 24
     STRIPE_SECRET_KEY: str = ""        # sk_live_xxx or sk_test_xxx

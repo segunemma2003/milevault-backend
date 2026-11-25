@@ -23,6 +23,9 @@ class User(Base):
     password_reset_token = Column(String(128), nullable=True, index=True)
     password_reset_expires_at = Column(DateTime, nullable=True)
     is_admin = Column(Boolean, default=False)
+    # Which admin areas this admin may use: "super" (everything), "finance" or "support".
+    # NULL on an admin means super (admins created before roles existed).
+    admin_role = Column(String(20), nullable=True)
     is_agent = Column(Boolean, default=False)
     phone = Column(String(50), nullable=True)
     location = Column(String(200), nullable=True)

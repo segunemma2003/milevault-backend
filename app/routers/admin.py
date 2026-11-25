@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.dependencies import get_current_admin
+from app.dependencies import get_current_admin, require_admin
 from app.models.user import User
 from app.models.currency import Currency, ExchangeRate, PaymentGateway, Refund, CurrencyType, PaymentGatewayName, PlatformSettings
 from app.models.agent import (
@@ -41,7 +41,7 @@ def _notify(db: Session, user_id: str, title: str, message: str):
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/overview", summary="Platform overview stats")
-def overview(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def overview(db: Session = Depends(get_db), _: User = Depends(require_admin("view"))):
     from sqlalchemy import func
     total_users = db.query(User).count()
     total_txns = db.query(Transaction).count()
@@ -66,7 +66,7 @@ def overview(db: Session = Depends(get_db), _: User = Depends(get_current_admin)
 def admin_analytics(
     days: int = Query(30, ge=7, le=90),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     """Return daily platform metrics for the last N days."""
     from sqlalchemy import func as sqlfunc
@@ -173,7 +173,7 @@ def admin_analytics(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/currencies", summary="List all currencies")
-def list_currencies(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_currencies(db: Session = Depends(get_db), _: User = Depends(require_admin("view"))):
     currencies = db.query(Currency).order_by(Currency.code).all()
     return [
         {
@@ -198,7 +198,7 @@ def add_currency(
     currency_type: str = Body("fiat"),
     decimal_places: int = Body(2),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     code = code.upper().strip()
     if db.query(Currency).filter(Currency.code == code).first():
@@ -235,7 +235,7 @@ def update_currency(
     name: Optional[str] = Body(None),
     symbol: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     currency = db.query(Currency).filter(Currency.id == currency_id).first()
     if not currency:
@@ -256,7 +256,7 @@ def update_currency(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/exchange-rates", summary="List all exchange rates")
-def list_exchange_rates(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_exchange_rates(db: Session = Depends(get_db), _: User = Depends(require_admin("view"))):
     rates = db.query(ExchangeRate).all()
     return [
         {
@@ -282,7 +282,7 @@ def set_exchange_rate(
     rate: float = Body(...),
     spread_percent: float = Body(0.5),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     from_cur = db.query(Currency).filter(Currency.code == from_code.upper()).first()
     to_cur = db.query(Currency).filter(Currency.code == to_code.upper()).first()
@@ -335,7 +335,7 @@ def set_exchange_rate(
 def deactivate_exchange_rate(
     rate_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     er = db.query(ExchangeRate).filter(ExchangeRate.id == rate_id).first()
     if not er:
@@ -351,7 +351,7 @@ def deactivate_exchange_rate(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/payment-gateways", summary="List configured payment gateways")
-def list_gateways(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_gateways(db: Session = Depends(get_db), _: User = Depends(require_admin("settings"))):
     gws = db.query(PaymentGateway).all()
     return [
         {
@@ -385,7 +385,7 @@ def add_gateway(
     supports_deposit: bool = Body(True),
     supports_withdrawal: bool = Body(True),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     try:
         gw_name = PaymentGatewayName(name.lower())
@@ -423,7 +423,7 @@ def update_gateway(
     min_amount: Optional[float] = Body(None),
     max_amount: Optional[float] = Body(None),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     gw = db.query(PaymentGateway).filter(PaymentGateway.id == gateway_id).first()
     if not gw:
@@ -445,7 +445,7 @@ def update_gateway(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/agents/pending", summary="List pending agent applications")
-def list_pending_agents(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_pending_agents(db: Session = Depends(get_db), _: User = Depends(require_admin("support"))):
     agents = db.query(Agent).filter(Agent.status == AgentStatus.pending).all()
     return [
         {
@@ -470,7 +470,7 @@ def list_pending_agents(db: Session = Depends(get_db), _: User = Depends(get_cur
 def approve_agent(
     agent_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
@@ -503,7 +503,7 @@ def reject_agent(
     agent_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     if len(reason.strip()) < 20:
         raise HTTPException(
@@ -536,7 +536,7 @@ def suspend_agent(
     agent_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     agent = db.query(Agent).filter(Agent.id == agent_id, Agent.status == AgentStatus.approved).first()
     if not agent:
@@ -561,7 +561,7 @@ def suspend_agent(
 def list_refunds(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     q = db.query(Refund)
     if status_filter:
@@ -598,7 +598,7 @@ def create_refund(
     reason: str = Body(...),
     admin_notes: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     """
     Admin reviews dispute and creates a refund. Only admin can do this.
@@ -681,7 +681,7 @@ def list_users(
     per_page: int = 50,
     role: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     q = db.query(User)
     if role:
@@ -717,7 +717,7 @@ def deactivate_user(
     user_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     if str(admin.id) == user_id:
         raise HTTPException(
@@ -739,7 +739,7 @@ def freeze_wallet(
     user_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -754,7 +754,7 @@ def freeze_wallet(
 def unfreeze_wallet(
     user_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -770,7 +770,7 @@ def block_withdrawals(
     user_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -785,7 +785,7 @@ def block_withdrawals(
 def unblock_withdrawals(
     user_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -801,7 +801,7 @@ def reverse_transfer(
     wallet_txn_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     """Admin reverses a transfer_out/transfer_in pair. Restores balances on both sides."""
     out_txn = db.query(WalletTransaction).filter(
@@ -861,12 +861,13 @@ def reverse_transfer(
 def make_admin(
     user_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("settings")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "User not found."})
     user.is_admin = True
+    user.admin_role = user.admin_role or "super"
     db.commit()
     return {"message": f"Admin rights granted to '{user.email}'."}
 
@@ -881,7 +882,7 @@ def list_all_transactions(
     per_page: int = 50,
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     q = db.query(Transaction)
     if status_filter:
@@ -915,7 +916,7 @@ def force_status(
     new_status: str = Body(...),
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("settings")),
 ):
     valid_statuses = {"pending_approval", "approved", "in_progress", "completed", "cancelled", "disputed"}
     if new_status not in valid_statuses:
@@ -963,7 +964,7 @@ def admin_list_disputes(
     page: int = 1,
     per_page: int = 50,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     q = db.query(Dispute)
     if status_filter:
@@ -997,7 +998,7 @@ def admin_list_disputes(
 def admin_get_dispute(
     dispute_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     """
     Admin endpoint: returns the full dispute package —
@@ -1138,7 +1139,7 @@ def admin_update_dispute(
         description="On resolve: refund_buyer | release_agent | omit for default (pay only if agent completed verification)",
     ),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     valid = {"open", "in_review", "resolved", "closed"}
     if new_status not in valid:
@@ -1227,7 +1228,7 @@ def _settings_to_dict(s: PlatformSettings) -> dict:
 @router.get("/settings", summary="Get platform fee and policy settings")
 def get_platform_settings(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     return _settings_to_dict(_get_settings(db))
 
@@ -1254,7 +1255,7 @@ def update_platform_settings(
     platform_name: Optional[str] = Body(None),
     support_email: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("settings")),
 ):
     """Update any subset of platform settings. All fields are optional."""
     if escrow_fee_percent is not None and not (0 <= escrow_fee_percent <= 50):
@@ -1331,7 +1332,7 @@ def fee_preview(
     amount: float,
     currency: str = "USD",
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     """Calculate what the escrow fee would be for a given deal amount."""
     s = _get_settings(db)
@@ -1363,7 +1364,7 @@ def fee_preview(
 def list_withdrawals(
     status: Optional[str] = "pending",
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     q = db.query(WalletTransaction).filter(WalletTransaction.type == "withdrawal")
     if status and status != "all":
@@ -1394,7 +1395,7 @@ def approve_withdrawal(
     txn_id: str,
     notes: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
@@ -1455,7 +1456,7 @@ def reject_withdrawal(
     txn_id: str,
     reason: str = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     txn = db.query(WalletTransaction).filter(
         WalletTransaction.id == txn_id,
@@ -1504,7 +1505,7 @@ def reject_withdrawal(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/agent-plans", summary="List all agent subscription plans")
-def list_agent_plans(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_agent_plans(db: Session = Depends(get_db), _: User = Depends(require_admin("view"))):
     plans = db.query(AgentSubscriptionPlan).order_by(AgentSubscriptionPlan.price).all()
     return [
         {
@@ -1533,7 +1534,7 @@ def create_agent_plan(
     priority_boost: int = Body(0),
     features: list = Body(default=[]),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     if db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.name == name).first():
         raise HTTPException(status_code=409, detail={"error": "PLAN_EXISTS", "message": f"Plan '{name}' already exists."})
@@ -1562,7 +1563,7 @@ def update_agent_plan(
     features: Optional[list] = Body(None),
     is_active: Optional[bool] = Body(None),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     plan = db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.id == plan_id).first()
     if not plan:
@@ -1585,7 +1586,7 @@ def update_agent_plan(
 def delete_agent_plan(
     plan_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     plan = db.query(AgentSubscriptionPlan).filter(AgentSubscriptionPlan.id == plan_id).first()
     if not plan:
@@ -1600,7 +1601,7 @@ def delete_agent_plan(
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/agent-service-tiers", summary="List agent service fee tiers")
-def list_agent_service_tiers(db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_agent_service_tiers(db: Session = Depends(get_db), _: User = Depends(require_admin("view"))):
     tiers = db.query(AgentServiceTier).order_by(AgentServiceTier.min_transaction_amount).all()
     return [
         {
@@ -1630,7 +1631,7 @@ def create_agent_service_tier(
     currency: str = Body("USD"),
     description: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     if fee_type not in ("flat", "percent"):
         raise HTTPException(status_code=422, detail={"error": "INVALID_FEE_TYPE", "message": "fee_type must be 'flat' or 'percent'."})
@@ -1665,7 +1666,7 @@ def update_agent_service_tier(
     is_active: Optional[bool] = Body(None),
     description: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     tier = db.query(AgentServiceTier).filter(AgentServiceTier.id == tier_id).first()
     if not tier:
@@ -1686,7 +1687,7 @@ def update_agent_service_tier(
 def delete_agent_service_tier(
     tier_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("settings")),
 ):
     tier = db.query(AgentServiceTier).filter(AgentServiceTier.id == tier_id).first()
     if not tier:
@@ -1704,7 +1705,7 @@ def delete_agent_service_tier(
 def list_all_agent_requests(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("support")),
 ):
     q = db.query(AgentRequest)
     if status_filter:
@@ -1745,7 +1746,7 @@ def admin_assign_agent(
     agent_id: str = Body(...),
     notes: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("support")),
 ):
     """
     Admin can assign (or reassign) any approved agent to a buyer's agent request.
@@ -1816,7 +1817,7 @@ def admin_assign_agent(
 def list_agent_earnings(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("finance")),
 ):
     q = db.query(AgentEarning)
     if status_filter:
@@ -1849,7 +1850,7 @@ def process_agent_payout(
     earning_id: str,
     notes: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(require_admin("finance")),
 ):
     earning = db.query(AgentEarning).filter(AgentEarning.id == earning_id).first()
     if not earning:
@@ -1897,7 +1898,7 @@ def process_agent_payout(
 @router.get("/agent-subscriptions", summary="List all active agent subscriptions")
 def list_agent_subscriptions(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin("view")),
 ):
     subs = db.query(AgentSubscription).filter(
         AgentSubscription.is_active == True

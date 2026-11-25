@@ -366,6 +366,13 @@ def process_refund(self, refund_id: str) -> dict:
         from datetime import datetime
         refund.status = "completed"
         refund.processed_at = datetime.utcnow()
+        from app.services.notification_service import create_notification
+        create_notification(
+            db, str(refund.refund_to), "Refund received",
+            f"{refund.amount:,.2f} {refund.currency} from a resolved dispute has been returned to your wallet.",
+            "payment", related_item_id=str(refund.transaction_id) if getattr(refund, "transaction_id", None) else None,
+            related_item_type="transaction",
+        )
         db.commit()
         logger.info(f"Refund {refund_id} completed")
         return {"status": "completed", "refund_id": refund_id}

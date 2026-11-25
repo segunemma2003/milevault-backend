@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_admin
+from app.dependencies import get_current_admin, require_admin
 from app.models.support import SupportReply, SupportTicket
 from app.models.user import User
 
@@ -116,7 +116,7 @@ def _ticket_out(t: SupportTicket, replies=None):
 
 
 @router.get("/admin/support")
-def list_tickets(status: str = "open", db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def list_tickets(status: str = "open", db: Session = Depends(get_db), _: User = Depends(require_admin("support"))):
     q = db.query(SupportTicket)
     if status != "all":
         q = q.filter(SupportTicket.status == status)
@@ -124,7 +124,7 @@ def list_tickets(status: str = "open", db: Session = Depends(get_db), _: User = 
 
 
 @router.get("/admin/support/{ticket_id}")
-def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: User = Depends(require_admin("support"))):
     t = db.query(SupportTicket).filter(SupportTicket.id == ticket_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -134,7 +134,7 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: User = Depends(
 
 @router.post("/admin/support/{ticket_id}/reply")
 def reply(ticket_id: str, background: BackgroundTasks, body: str = Body(..., embed=True, min_length=1, max_length=10000),
-          close: bool = Body(False, embed=True), db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
+          close: bool = Body(False, embed=True), db: Session = Depends(get_db), admin: User = Depends(require_admin("support"))):
     t = db.query(SupportTicket).filter(SupportTicket.id == ticket_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -154,7 +154,7 @@ def reply(ticket_id: str, background: BackgroundTasks, body: str = Body(..., emb
 
 @router.put("/admin/support/{ticket_id}/status")
 def set_status(ticket_id: str, status: str = Body(..., embed=True), db: Session = Depends(get_db),
-               _: User = Depends(get_current_admin)):
+               _: User = Depends(require_admin("support"))):
     if status not in ("open", "answered", "closed"):
         raise HTTPException(status_code=422, detail="Invalid status")
     t = db.query(SupportTicket).filter(SupportTicket.id == ticket_id).first()
@@ -264,7 +264,7 @@ class ComposeRequest(BaseModel):
 
 @router.post("/admin/support/compose")
 def compose(payload: ComposeRequest, background: BackgroundTasks, db: Session = Depends(get_db),
-            admin: User = Depends(get_current_admin)):
+            admin: User = Depends(require_admin("support"))):
     """Start a new conversation from support@. It becomes a ticket so the customer's reply threads back."""
     to = payload.to.lower()
     user = db.query(User).filter(User.email == to).first()

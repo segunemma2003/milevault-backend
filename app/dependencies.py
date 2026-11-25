@@ -78,6 +78,40 @@ def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+ADMIN_ROLES = ("super", "finance", "support")
+# Areas of the admin each role may use. "view" = read-only overviews and lists.
+ROLE_AREAS = {
+    "super": {"*"},
+    "finance": {"view", "finance"},
+    "support": {"view", "support", "content"},
+}
+
+
+def admin_role_of(user: User) -> Optional[str]:
+    if not user.is_admin:
+        return None
+    return user.admin_role if user.admin_role in ADMIN_ROLES else "super"
+
+
+def admin_can(user: User, area: str) -> bool:
+    areas = ROLE_AREAS.get(admin_role_of(user) or "", set())
+    return "*" in areas or area in areas
+
+
+def require_admin(area: str):
+    """Admin who may use `area`: finance (money movement), support (KYC, disputes, inbox, agents),
+    content (blog, careers), view (read-only lists) or settings (super admin only)."""
+    def dep(current_user: User = Depends(get_current_admin)) -> User:
+        if not admin_can(current_user, area):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": "ADMIN_ROLE_FORBIDDEN",
+                        "message": f"Your admin role ({admin_role_of(current_user)}) can't do this. Ask a super admin."},
+            )
+        return current_user
+    return dep
+
+
 def get_current_approved_agent(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_agent:
         raise HTTPException(

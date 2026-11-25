@@ -11,7 +11,6 @@ Rules enforced here:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import secrets
@@ -71,14 +70,6 @@ ADDRESS_PATTERNS = {
 def valid_address(network: str, address: str) -> bool:
     pat = ADDRESS_PATTERNS.get((network or "").lower())
     return bool(pat and pat.match((address or "").strip()))
-
-
-def auto_payout_limit(currency: str) -> Decimal:
-    try:
-        limits = json.loads(settings.AUTO_PAYOUT_LIMITS or "{}")
-        return ledger.to_decimal(limits.get(currency.upper(), 0))
-    except (ValueError, TypeError):
-        return Decimal(0)
 
 
 def ngn_rail() -> str:
@@ -461,10 +452,8 @@ def create_withdrawal(db: Session, user: User, *, destination_id: str, amount) -
         raise FlowError("INSUFFICIENT_BALANCE",
                         f"Your {dest.currency} balance ({e.have}) is less than {amt}.", 422)
     db.commit()
-
-    limit = auto_payout_limit(dest.currency)
-    if limit > 0 and amt <= limit and not txn.flagged_high_risk:
-        dispatch_payout(db, txn)
+    # Every withdrawal waits for a finance admin's approval (Admin → Withdrawals) before any
+    # money is sent — there is deliberately no automatic payout path.
     return txn
 
 

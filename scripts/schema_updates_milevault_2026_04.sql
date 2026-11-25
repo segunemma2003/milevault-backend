@@ -78,3 +78,6 @@ CREATE INDEX IF NOT EXISTS ix_agent_request_messages_req ON agent_request_messag
 ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS admin_payout_approved BOOLEAN DEFAULT false;
 ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS admin_payout_approved_at TIMESTAMP;
 ALTER TABLE agent_earnings ADD COLUMN IF NOT EXISTS admin_payout_approved_by VARCHAR REFERENCES users(id);
+
+-- Role-specific admins (super / finance / support)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_role VARCHAR(20);
