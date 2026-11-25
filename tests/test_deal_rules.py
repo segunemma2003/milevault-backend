@@ -44,6 +44,10 @@ def db():
     ngn = Currency(code="NGN", name="Naira", symbol="₦", decimal_places=2)
     s.add_all([usd, ngn]); s.flush()
     s.add(ExchangeRate(from_currency_id=usd.id, to_currency_id=ngn.id, rate=1500.0, spread_percent=0.0))
+    from app.models.currency import PlatformSettings
+    # Fee-free unless a test sets fees (the model's defaults charge 2.5%).
+    s.add(PlatformSettings(id="default", escrow_fee_percent=0, min_fee_amount=0, withdrawal_fee_percent=0,
+                           withdrawal_fee_fixed=0, dispute_fee_fixed=0, dispute_fee_percent=0))
     s.commit()
     yield s
     s.close()
@@ -167,3 +171,97 @@ def test_paying_from_naira_without_enough_naira_fails_cleanly(db):
         T.fund_deal(tx.id, FundMilestoneBody(pay_from="NGN"), b, db)
     assert e.value.detail["error"] == "INSUFFICIENT_FUNDS"
     assert avail(db, b, "NGN")[0] == Decimal("1000")   # nothing taken
+
+
+# ─── Fees (set by admin / finance) ────────────────────────────────────────────
+
+from app.models.currency import PlatformSettings  # noqa: E402
+from app.models.wallet import LedgerEntry  # noqa: E402
+
+
+def set_fees(db, **kw):
+    s = db.query(PlatformSettings).filter_by(id="default").first() or PlatformSettings(id="default")
+    defaults = dict(escrow_fee_percent=0, min_fee_amount=0, max_fee_amount=None, fee_paid_by="buyer",
+                    buyer_fee_share=100, seller_fee_share=0, withdrawal_fee_percent=0, withdrawal_fee_fixed=0,
+                    dispute_fee_fixed=0, dispute_fee_percent=0, fee_currency="USD")
+    for k, v in {**defaults, **kw}.items():
+        setattr(s, k, v)
+    db.add(s); db.commit()
+
+
+def platform_revenue(db, cur="USD"):
+    return sum(Decimal(str(e.amount)) for e in db.query(LedgerEntry).filter_by(currency=cur, credit_account="platform_fees").all())
+
+
+def test_buyer_pays_the_escrow_fee_on_top(db):
+    set_fees(db, escrow_fee_percent=5, fee_paid_by="buyer")
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m1, m2) = deal(db, b, s, 100, [("Design", 40), ("Build", 60)])
+    assert (m1.buyer_fee, m1.seller_fee, m2.buyer_fee) == (2.0, 0.0, 3.0)
+    deposit(db, b, "USD", 105)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)        # pays 100 + 5 fee
+    assert avail(db, b, "USD") == (Decimal("0"), Decimal("105"))
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m1.id)); db.commit()
+    assert avail(db, s, "USD")[0] == Decimal("40")          # seller gets the full price
+    assert avail(db, b, "USD")[1] == Decimal("63")          # 60 + 3 still escrowed for m2
+    assert platform_revenue(db) == Decimal("2")
+
+
+def test_seller_pays_the_escrow_fee_from_the_release(db):
+    set_fees(db, escrow_fee_percent=10, fee_paid_by="seller")
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m,) = deal(db, b, s, 50)
+    deposit(db, b, "USD", 50)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m.id)); db.commit()
+    assert avail(db, s, "USD")[0] == Decimal("45") and platform_revenue(db) == Decimal("5")
+
+
+def test_split_fee_and_min_max(db):
+    set_fees(db, escrow_fee_percent=1, min_fee_amount=4, fee_paid_by="split", buyer_fee_share=50, seller_fee_share=50)
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m,) = deal(db, b, s, 100)                         # 1% = 1 → raised to the 4 minimum
+    assert (m.buyer_fee, m.seller_fee) == (2.0, 2.0)
+    set_fees(db, escrow_fee_percent=10, max_fee_amount=3, fee_paid_by="buyer")
+    tx2, (m2,) = deal(db, b, s, 100)
+    assert m2.buyer_fee == 3.0                             # capped at the 3 maximum
+    assert m.buyer_fee == 2.0                              # earlier deal keeps its locked fee
+
+
+def test_refund_returns_the_buyers_fee(db):
+    """The buyer's fee share sits in escrow with the milestone, so refunding funded_amount returns it."""
+    set_fees(db, escrow_fee_percent=5, fee_paid_by="buyer")
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m,) = deal(db, b, s, 100)
+    deposit(db, b, "USD", 105)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+    db.refresh(m)
+    assert m.funded_amount == 105.0 and m.is_funded
+
+
+def test_ongoing_milestone_is_never_paused(db):
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m1, m2, m3) = deal(db, b, s, 90, [("A", 30), ("B", 30), ("C", 30)])
+    deposit(db, b, "USD", 60)
+    T.fund_milestone(tx.id, m1.id, FundMilestoneBody(), b, db)
+    T.fund_milestone(tx.id, m2.id, FundMilestoneBody(), b, db)
+    T.start_milestone(tx.id, m2.id, s, db)
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m1.id)); db.commit()
+    db.refresh(tx)
+    assert tx.status != "awaiting_funding"                 # B is being worked on → no pause
+
+
+def test_dispute_fee_is_paid_by_whoever_opens_it(db):
+    from app.routers import disputes
+    from app.schemas.dispute import DisputeCreate
+    set_fees(db, dispute_fee_fixed=5, dispute_fee_percent=0)
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m,) = deal(db, b, s, 20)
+    body = dict(transaction_id=tx.id, milestone_id=m.id, title="Not delivered", reason="non_delivery",
+                description="The seller never delivered the agreed work at all.", evidence_urls=["https://example.com/proof.png"])
+    with pytest.raises(HTTPException) as e:
+        disputes.create_dispute(DisputeCreate(**body), s, db)   # seller has nothing
+    assert e.value.detail["error"] == "DISPUTE_FEE_UNPAID"
+    deposit(db, s, "NGN", 10000)                                 # only naira: charged ₦7,500 at 1,500
+    disputes.create_dispute(DisputeCreate(**body), s, db)
+    assert avail(db, s, "NGN")[0] == Decimal("2500") and platform_revenue(db, "NGN") == Decimal("7500")

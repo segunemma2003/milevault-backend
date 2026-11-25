@@ -1211,6 +1211,8 @@ def _settings_to_dict(s: PlatformSettings) -> dict:
         "seller_fee_share": s.seller_fee_share,
         "withdrawal_fee_percent": s.withdrawal_fee_percent,
         "withdrawal_fee_fixed": s.withdrawal_fee_fixed,
+        "dispute_fee_fixed": getattr(s, "dispute_fee_fixed", 0) or 0,
+        "dispute_fee_percent": getattr(s, "dispute_fee_percent", 0) or 0,
         "min_transaction_amount": s.min_transaction_amount,
         "max_transaction_amount": s.max_transaction_amount,
         "high_value_checklist_threshold": getattr(s, "high_value_checklist_threshold", None),
@@ -1244,6 +1246,8 @@ def update_platform_settings(
     seller_fee_share: Optional[float] = Body(None),
     withdrawal_fee_percent: Optional[float] = Body(None),
     withdrawal_fee_fixed: Optional[float] = Body(None),
+    dispute_fee_fixed: Optional[float] = Body(None),
+    dispute_fee_percent: Optional[float] = Body(None),
     min_transaction_amount: Optional[float] = Body(None),
     max_transaction_amount: Optional[float] = Body(None),
     high_value_checklist_threshold: Optional[float] = Body(None),
@@ -1255,9 +1259,16 @@ def update_platform_settings(
     platform_name: Optional[str] = Body(None),
     support_email: Optional[str] = Body(None),
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin("settings")),
+    admin: User = Depends(require_admin("finance")),
 ):
-    """Update any subset of platform settings. All fields are optional."""
+    """Update any subset of platform settings (fees, limits, timelines). Finance or super admins."""
+    for name, val in (("withdrawal_fee_percent", withdrawal_fee_percent), ("dispute_fee_percent", dispute_fee_percent)):
+        if val is not None and not (0 <= val <= 50):
+            raise HTTPException(status_code=422, detail={"error": "INVALID_FEE", "message": f"{name} must be between 0 and 50."})
+    for name, val in (("withdrawal_fee_fixed", withdrawal_fee_fixed), ("dispute_fee_fixed", dispute_fee_fixed),
+                      ("min_fee_amount", min_fee_amount), ("max_fee_amount", max_fee_amount)):
+        if val is not None and val < 0:
+            raise HTTPException(status_code=422, detail={"error": "INVALID_FEE", "message": f"{name} can't be negative."})
     if escrow_fee_percent is not None and not (0 <= escrow_fee_percent <= 50):
         raise HTTPException(
             status_code=422,
@@ -1307,6 +1318,8 @@ def update_platform_settings(
         "seller_fee_share": seller_fee_share,
         "withdrawal_fee_percent": withdrawal_fee_percent,
         "withdrawal_fee_fixed": withdrawal_fee_fixed,
+        "dispute_fee_fixed": dispute_fee_fixed,
+        "dispute_fee_percent": dispute_fee_percent,
         "min_transaction_amount": min_transaction_amount,
         "max_transaction_amount": max_transaction_amount,
         "high_value_checklist_threshold": high_value_checklist_threshold,
@@ -1425,12 +1438,8 @@ def approve_withdrawal(
     from app.services import ledger
     from app.services.ledger import InsufficientFunds
     try:
-        ledger.debit(
-            db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount, from_bucket="pending",
-            reference_type="withdrawal_paid", reference_id=str(txn.id),
-            description=f"Withdrawal paid{(' — ' + notes) if notes else ''}",
-            idempotency_key=str(txn.id),
-        )
+        from app.services import fees
+        fees.debit_withdrawal(db, txn)  # pay out amount − fee; the fee is platform revenue
     except InsufficientFunds:
         db.rollback()
         raise HTTPException(status_code=409, detail={

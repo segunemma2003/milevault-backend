@@ -84,3 +84,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_role VARCHAR(20);
 
 -- Live face check: challenge shown to the KYC reviewer
 ALTER TABLE kyc_documents ADD COLUMN IF NOT EXISTS notes TEXT;
+
+-- Fees set by admin/finance: escrow fee locked per milestone, withdrawal fee, dispute fee
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS buyer_fee DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS seller_fee DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS fee DOUBLE PRECISION;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS dispute_fee_fixed DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS dispute_fee_percent DOUBLE PRECISION DEFAULT 0;

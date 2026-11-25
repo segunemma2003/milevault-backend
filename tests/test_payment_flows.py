@@ -362,3 +362,24 @@ def test_payhub_webhook_signature(monkeypatch):
     assert payhub.verify_webhook(body, f"t={t},v1={sig}")
     assert not payhub.verify_webhook(body, f"t={t},v1={'0' * 64}")
     assert not payhub.verify_webhook(body, f"t={t - 3600},v1={sig}")  # stale
+
+
+def test_withdrawal_fee_is_deducted_from_the_payout(db, monkeypatch):
+    from app.models.currency import PlatformSettings
+    from app.models.wallet import LedgerEntry
+    db.add(PlatformSettings(id="default", withdrawal_fee_percent=1, withdrawal_fee_fixed=0, fee_currency="USDT"))
+    db.commit()
+    u = user(db)
+    ledger.credit(db, user_id=u.id, currency="USDT", amount="200", reference_type="t")
+    db.commit()
+    dest = confirmed_crypto_dest(db, u)
+    sent = {}
+    monkeypatch.setattr(quidax, "create_withdrawal", lambda **k: sent.update(k) or {"id": "W1", "status": "submitted"})
+    txn = payment_flows.create_withdrawal(db, u, destination_id=dest.id, amount=100)
+    assert txn.fee == 1.0 and avail(db, u, "USDT") == (Decimal("100"), Decimal("100"))
+    payment_flows.dispatch_payout(db, txn)
+    assert float(sent["amount"]) == 99.0                         # user receives amount − fee
+    payment_flows.settle_payout(db, str(txn.id), success=True)
+    assert avail(db, u, "USDT") == (Decimal("100"), Decimal("0"))
+    fee_rows = db.query(LedgerEntry).filter_by(credit_account="platform_fees").all()
+    assert sum(Decimal(str(e.amount)) for e in fee_rows) == Decimal("1")

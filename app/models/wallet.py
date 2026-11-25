@@ -44,6 +44,7 @@ class WalletTransaction(Base):
     # escrow_lock | escrow_release | escrow_refund
     # refund | conversion
     amount = Column(Float, nullable=False)
+    fee = Column(Float, nullable=True)  # withdrawal fee kept by the platform (paid out = amount - fee)
     currency = Column(String(10), nullable=False)
     status = Column(String(20), default="pending")  # pending | completed | failed | cancelled
     description = Column(String(500), nullable=True)

@@ -438,9 +438,13 @@ def create_withdrawal(db: Session, user: User, *, destination_id: str, amount) -
 
     target = (f"{dest.bank_name or 'Bank'} ••••{(dest.account_number or '')[-4:]}" if dest.kind == "bank"
               else f"{dest.network.upper()} {dest.address[:6]}…{dest.address[-4:]}")
+    from app.services import fees
+    fee = fees.withdrawal_fee(db, amt, dest.currency)
+    if fee >= amt:
+        raise FlowError("AMOUNT_BELOW_FEE", f"The withdrawal fee is {dest.currency} {fee}; withdraw more than that.", 422)
     txn = WalletTransaction(user_id=user.id, type="withdrawal", amount=float(amt), currency=dest.currency,
-                            status="pending", method=dest.kind, payout_destination_id=dest.id,
-                            description=f"Withdrawal to {target}")
+                            status="pending", method=dest.kind, payout_destination_id=dest.id, fee=float(fee) or None,
+                            description=f"Withdrawal to {target}" + (f" (fee {dest.currency} {fee})" if fee > 0 else ""))
     db.add(txn)
     db.flush()
     try:
@@ -467,6 +471,8 @@ def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
     if txn.status != "pending":
         return f"skipped:{txn.status}"
     dest = db.query(PayoutDestination).filter_by(id=txn.payout_destination_id).first()
+    # The user receives the amount minus the withdrawal fee (kept by the platform on settlement).
+    payout_amount = round(float(txn.amount) - float(txn.fee or 0), 8)
     if not dest:
         raise FlowError("DESTINATION_NOT_FOUND", "Withdrawal destination not found.", 404)
     reference = str(txn.id)
@@ -476,7 +482,7 @@ def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
                 acct = payhub.register_bank_account(bank_code=dest.bank_code, bank_name=dest.bank_name or dest.bank_code,
                                                     account_number=dest.account_number, external_ref=str(txn.user_id))
                 dest.provider_recipient_code = acct["id"]
-            res = payhub.request_payout(bank_account_id=dest.provider_recipient_code, amount=txn.amount,
+            res = payhub.request_payout(bank_account_id=dest.provider_recipient_code, amount=payout_amount,
                                         client_reference=reference)
             txn.provider_payout_id = res["id"]
             if res["status"] in payhub.PAYOUT_FAILED:
@@ -487,11 +493,11 @@ def dispatch_payout(db: Session, txn: WalletTransaction) -> str:
             if not dest.provider_recipient_code:
                 dest.provider_recipient_code = paystack_rails.create_recipient(
                     name=dest.account_name, account_number=dest.account_number, bank_code=dest.bank_code)
-            res = paystack_rails.initiate_transfer(amount=txn.amount, recipient_code=dest.provider_recipient_code,
+            res = paystack_rails.initiate_transfer(amount=payout_amount, recipient_code=dest.provider_recipient_code,
                                                    reference=reference, reason="Bondrova withdrawal")
             txn.provider_payout_id = res.get("transfer_code")
         else:
-            res = quidax.create_withdrawal(from_user="me", currency=dest.currency, amount=txn.amount,
+            res = quidax.create_withdrawal(from_user="me", currency=dest.currency, amount=payout_amount,
                                            address=dest.address, network=dest.network, reference=reference,
                                            note="Bondrova withdrawal", destination_tag=dest.destination_tag)
             txn.provider_payout_id = res.get("id")
@@ -524,12 +530,13 @@ def settle_payout(db: Session, withdrawal_id: str, *, success: bool, reason: str
     if txn.status in ("completed", "failed"):
         return f"already_{txn.status}"
     if success:
-        ledger.debit(db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount, from_bucket="pending",
-                     reference_type="withdrawal_paid", reference_id=str(txn.id),
-                     description="Withdrawal paid out", idempotency_key=str(txn.id))
+        from app.services import fees
+        fees.debit_withdrawal(db, txn)
         txn.status = "completed"
+        net = round(float(txn.amount) - float(txn.fee or 0), 2)
         create_notification(db, txn.user_id, "Withdrawal sent",
-                            f"Your withdrawal of {txn.currency} {txn.amount} has been sent.", "payment")
+                            f"Your withdrawal of {txn.currency} {net:,.2f} has been sent"
+                            + (f" (fee {txn.currency} {float(txn.fee):,.2f})." if txn.fee else "."), "payment")
     else:
         ledger.move(db, user_id=txn.user_id, currency=txn.currency, amount=txn.amount, from_bucket="pending",
                     to_bucket="available", reference_type="withdrawal_reversal", reference_id=str(txn.id),

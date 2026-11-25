@@ -130,6 +130,9 @@ class PlatformSettings(Base):
 
     withdrawal_fee_percent = Column(Float, default=0.5)
     withdrawal_fee_fixed = Column(Float, default=0.0)
+    # Paid by whoever opens a dispute: fixed (fee currency) + % of the disputed amount. 0 = free.
+    dispute_fee_fixed = Column(Float, default=0.0)
+    dispute_fee_percent = Column(Float, default=0.0)
 
     max_transaction_amount = Column(Float, nullable=True)
     min_transaction_amount = Column(Float, default=1.0)

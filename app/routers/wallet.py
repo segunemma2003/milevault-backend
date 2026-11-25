@@ -675,6 +675,14 @@ def withdraw(
         method=payload.method,
         flagged_high_risk=withdrawal_flagged_high_risk(current_user, float(payload.amount)),
     )
+    from app.services import fees
+    w_fee = fees.withdrawal_fee(db, payload.amount, currency_upper)
+    if w_fee >= ledger.to_decimal(payload.amount):
+        raise HTTPException(status_code=422, detail={"error": "AMOUNT_BELOW_FEE",
+                            "message": f"The withdrawal fee is {currency_upper} {w_fee}; withdraw more than that."})
+    txn.fee = float(w_fee) or None
+    if w_fee > 0:
+        txn.description += f" (fee {currency_upper} {w_fee}; you receive {currency_upper} {ledger.to_decimal(payload.amount) - w_fee})"
     db.add(txn)
     db.flush()
     # Locked, exact move available → pending. Two simultaneous requests serialise on the
@@ -935,6 +943,13 @@ def platform_info(db: Session = Depends(get_db)):
         "min_fee_amount": settings.min_fee_amount if settings else 0,
         "max_fee_amount": settings.max_fee_amount if settings else None,
         "fee_currency": settings.fee_currency if settings else "USD",
+        "fee_paid_by": (settings.fee_paid_by if settings else "buyer") or "buyer",
+        "buyer_fee_share": settings.buyer_fee_share if settings else 100,
+        "seller_fee_share": settings.seller_fee_share if settings else 0,
+        "withdrawal_fee_percent": (settings.withdrawal_fee_percent if settings else 0) or 0,
+        "withdrawal_fee_fixed": (settings.withdrawal_fee_fixed if settings else 0) or 0,
+        "dispute_fee_fixed": (getattr(settings, "dispute_fee_fixed", 0) if settings else 0) or 0,
+        "dispute_fee_percent": (getattr(settings, "dispute_fee_percent", 0) if settings else 0) or 0,
         "high_value_checklist_threshold": getattr(settings, "high_value_checklist_threshold", None) if settings else None,
         "funding_deadline_days": get_funding_deadline_days(db),
         "auto_release_days": get_auto_release_days(db),

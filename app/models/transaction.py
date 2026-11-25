@@ -68,6 +68,10 @@ class Milestone(Base):
     # pending → partially_funded → funded → in_progress → under_review → completed
     # delivered (legacy) | revision_requested | disputed
     funded_amount = Column(Float, default=0.0)    # how much has been escrowed for this milestone
+    # Escrow fee locked when the deal was created (see app/services/fees.py): the buyer's share is
+    # paid with the milestone (so it is escrowed and refunded with it); the seller's comes out of the release.
+    buyer_fee = Column(Float, default=0.0)
+    seller_fee = Column(Float, default=0.0)
     is_funded = Column(Boolean, default=False)    # True when funded_amount >= amount
     funding_deadline = Column(DateTime, nullable=True)
     due_date = Column(DateTime, nullable=True)

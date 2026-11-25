@@ -54,6 +54,12 @@ def create_dispute(
         if not milestone:
             raise HTTPException(status_code=404, detail="Milestone not found for this transaction")
 
+    # Dispute fee (set by admin/finance), paid by whoever opens the dispute.
+    from app.services import fees, ledger as _ledger
+    disputed = float(milestone.amount) if milestone else float(tx.amount)
+    fee_cur = (fees.platform_settings(db).fee_currency or "USD").upper()
+    dispute_fee = fees.dispute_fee(db, disputed)
+
     dispute = Dispute(
         transaction_id=payload.transaction_id,
         milestone_id=payload.milestone_id,
@@ -66,6 +72,21 @@ def create_dispute(
     )
     db.add(dispute)
     db.flush()
+    charged = None
+    if dispute_fee > 0:
+        try:
+            charged = fees.collect_from_any_balance(
+                db, user_id=current_user.id, amount=dispute_fee, currency=fee_cur,
+                reference_type="dispute_fee", reference_id=dispute.id,
+                description=f"Dispute fee for '{tx.title}'", idempotency_key=dispute.id)
+        except _ledger.InsufficientFunds:
+            db.rollback()
+            raise HTTPException(status_code=402, detail={
+                "error": "DISPUTE_FEE_UNPAID",
+                "message": f"Opening a dispute costs {fee_cur} {dispute_fee:,.2f}. Add funds to your wallet and try again."})
+        from app.models.wallet import WalletTransaction
+        db.add(WalletTransaction(user_id=current_user.id, type="dispute_fee", amount=float(charged[1]), currency=charged[0],
+                                 status="completed", transaction_id=tx.id, description=f"Dispute fee for '{tx.title}'"))
 
     for i, url in enumerate(payload.evidence_urls):
         u = (url or "").strip()

@@ -76,6 +76,9 @@ def milestone_to_public_dict(m: Milestone) -> Dict[str, Any]:
         "delivered_at": m.delivered_at,
         "auto_release_at": m.auto_release_at,
         "funded_amount": m.funded_amount or 0,
+        "buyer_fee": m.buyer_fee or 0,
+        "seller_fee": m.seller_fee or 0,
+        "fund_target": round(float(m.amount) + float(m.buyer_fee or 0), 2),
         "is_funded": bool(m.is_funded),
         "expectations": m.expectations,
         "feedback": m.feedback,
@@ -270,10 +273,12 @@ def create_transaction(
     tx.locked_rate_from = entered_cur
     tx.locked_rate_to = "USD"
 
+    created_ms = []
     if not ms_in:
         # A deal without milestones is one payment, released in full when the buyer approves.
-        db.add(Milestone(transaction_id=tx.id, title="Full payment", description=payload.description,
-                         amount=deal_amount, currency="USD", due_date=payload.expected_completion_date))
+        created_ms.append(Milestone(transaction_id=tx.id, title="Full payment", description=payload.description,
+                                    amount=deal_amount, currency="USD", due_date=payload.expected_completion_date))
+        db.add(created_ms[-1])
     for m in ms_in:
         milestone = Milestone(
             transaction_id=tx.id,
@@ -288,6 +293,11 @@ def create_transaction(
             supporting_documents=m.supporting_documents or [],
         )
         db.add(milestone)
+        created_ms.append(milestone)
+
+    # The escrow fee (rate and who pays) is set by admin/finance and locked on the deal now.
+    from app.services import fees
+    fees.allocate_deal_fees(db, tx, created_ms)
 
     db.commit()
     db.refresh(tx)
@@ -721,8 +731,9 @@ def _cover_from_other_currency(db: Session, user: User, currency: str, need: flo
 def _fund_milestone_core(db: Session, tx: Transaction, milestone: Milestone, user: User, amount: Optional[float]) -> tuple:
     """Move up to the milestone's remaining amount from the buyer's available balance into escrow.
     Returns (paid, became_fully_funded). The milestone row must already be locked."""
+    from app.services.fees import fund_target
     currency = milestone.currency or tx.currency
-    target = float(milestone.amount)
+    target = fund_target(milestone)
     already = float(milestone.funded_amount or 0)
     remaining = round(target - already, 8)
     if milestone.is_funded or remaining <= 0:
@@ -829,13 +840,14 @@ def fund_milestone(
     ).with_for_update().first()
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
-    if milestone.is_funded or float(milestone.amount) - float(milestone.funded_amount or 0) <= 0:
+    from app.services.fees import fund_target
+    if milestone.is_funded or fund_target(milestone) - float(milestone.funded_amount or 0) <= 0:
         raise HTTPException(status_code=409, detail="Milestone is already fully funded")
     if body.amount is not None and body.amount <= 0:
         raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Funding amount must be greater than zero."})
 
     currency = milestone.currency or tx.currency
-    remaining = round(float(milestone.amount) - float(milestone.funded_amount or 0), 8)
+    remaining = round(fund_target(milestone) - float(milestone.funded_amount or 0), 8)
     want = min(float(body.amount), remaining) if body.amount is not None else remaining
     converted = _cover_from_other_currency(db, current_user, currency, want, body.pay_from)
     pay, became = _fund_milestone_core(db, tx, milestone, current_user, want)
@@ -867,7 +879,8 @@ def fund_deal(
     ms = [m for m in db.query(Milestone).filter(Milestone.transaction_id == tx.id)
           .order_by(Milestone.created_at.asc(), Milestone.id.asc()).with_for_update().all()
           if not m.is_funded and m.status != "completed"]
-    outstanding = round(sum(float(m.amount) - float(m.funded_amount or 0) for m in ms), 8)
+    from app.services.fees import fund_target
+    outstanding = round(sum(fund_target(m) - float(m.funded_amount or 0) for m in ms), 8)
     if outstanding <= 0:
         raise HTTPException(status_code=409, detail="This deal is already fully paid.")
     if body.amount is not None and body.amount <= 0:
@@ -1119,7 +1132,10 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         return False
 
     currency = milestone.currency or tx.currency
-    amount = milestone.funded_amount or milestone.amount
+    escrowed = float(milestone.funded_amount or milestone.amount)
+    fee_total = round(float(milestone.buyer_fee or 0) + float(milestone.seller_fee or 0), 8)
+    fee_total = min(fee_total, escrowed)
+    amount = round(escrowed - fee_total, 8)   # what the seller receives
 
     # Buyer escrow → seller available. Raises InsufficientFunds if the buyer's escrow can't
     # cover it (previously this silently clamped escrow to 0 and paid the seller anyway).
@@ -1133,6 +1149,11 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
     )
     if not released:
         return False
+    if fee_total > 0:
+        from app.services import fees
+        fees.collect(db, user_id=tx.buyer_id, currency=currency, amount=fee_total, from_bucket="escrow",
+                     reference_type="escrow_fee", reference_id=milestone.id,
+                     description=f"Bondrova fee for milestone '{milestone.title}'", idempotency_key=milestone.id)
 
     # Wallet transaction audit
     db.add(WalletTransaction(
@@ -1172,7 +1193,8 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
     create_notification(
         db, tx.seller_id,
         "Payment Released!",
-        f"Your payment of {currency} {amount:.2f} for '{milestone.title}' has been released to your wallet.",
+        f"Your payment of {currency} {amount:.2f} for '{milestone.title}' has been released to your wallet"
+        + (f" (Bondrova fee {currency} {float(milestone.seller_fee or 0):.2f})." if (milestone.seller_fee or 0) > 0 else "."),
         "transaction", related_item_id=tx.id, related_item_type="transaction",
     )
     create_notification(
@@ -1185,7 +1207,9 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
     # Next milestone not fully paid and nothing else paid in escrow → pause the deal until it is.
     if tx.status != "completed":
         open_ms = [m for m in all_milestones if m.status != "completed"]
-        if open_ms and not any(m.is_funded for m in open_ms):
+        ongoing = {"funded", "in_progress", "delivered", "under_review", "revision_requested", "disputed"}
+        # Only pause when nothing is paid or in progress: an ongoing milestone is never paused.
+        if open_ms and not any(m.is_funded or m.status in ongoing for m in open_ms):
             nxt = open_ms[0]
             due = round(float(nxt.amount) - float(nxt.funded_amount or 0), 2)
             tx.status = "awaiting_funding"
