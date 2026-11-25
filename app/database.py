@@ -15,7 +15,15 @@ _needs_ssl = any(h in _db_url for h in ("rlwy.net", "render.com", "neon.tech", "
 if _needs_ssl and "sslmode" not in _db_url:
     _db_url += ("&" if "?" in _db_url else "?") + "sslmode=require"
 
-engine = create_engine(_db_url)
+_engine_kwargs = {}
+if _db_url.startswith("postgres"):
+    _engine_kwargs = dict(
+        pool_size=10, max_overflow=20, pool_pre_ping=True, pool_recycle=1800,
+        # Postgres ends any transaction left idle for 5 minutes (an abandoned one holds table
+        # locks and a pooled connection — that froze deploys and slowed every request).
+        connect_args={"options": "-c idle_in_transaction_session_timeout=300000"},
+    )
+engine = create_engine(_db_url, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 _schema_log = logging.getLogger(__name__)
@@ -41,6 +49,22 @@ def _incremental_schema_statements() -> list[str]:
 
 
 _ADD_COLUMN = re.compile(r'\s*ALTER\s+TABLE\s+"?(\w+)"?\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"?(\w+)"?', re.I)
+
+
+def _end_abandoned_transactions() -> None:
+    """Before schema changes: end transactions that have sat idle for over 30s (e.g. left open by
+    a previous container's long-lived WebSocket sessions). They hold locks the schema step needs."""
+    try:
+        with engine.begin() as conn:
+            n = conn.execute(text(
+                "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                "AND state = 'idle in transaction' AND now() - state_change > interval '30 seconds'"
+            )).scalar()
+        if n:
+            _schema_log.warning("Schema: ended %s abandoned idle transaction(s) holding locks", n)
+    except Exception as exc:  # no permission, etc. — the lock timeouts below still keep boot moving
+        _schema_log.warning("Schema: could not end abandoned transactions: %s", exc)
 
 
 def _run_ddl(stmt: str, attempts: int = 4) -> None:
@@ -72,6 +96,7 @@ def create_tables():
     if engine.dialect.name != "postgresql":
         return
     stmts = _incremental_schema_statements()
+    _end_abandoned_transactions()
     with engine.connect() as conn:
         existing = {(r[0], r[1]) for r in conn.execute(text(
             "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()"))}

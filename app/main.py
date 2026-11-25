@@ -111,6 +111,8 @@ def _seed_default_currencies() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.services.celery_app import fail_fast_publishing
+    fail_fast_publishing()
     # Must succeed: otherwise ORM queries hit missing columns while the API still runs.
     create_tables()
     logger.info("Bondrova API started — tables and incremental schema verified.")
@@ -248,14 +250,20 @@ async def transaction_ws(
             await websocket.close(code=4003, reason="Forbidden")
             return
 
+        # Plain values, then release the DB connection: a session held for the life of the socket
+        # kept a transaction (and table locks) open per open browser tab.
+        user_id, first_name = str(user.id), user.first_name
+        full_name = f"{user.first_name} {user.last_name}".strip()
+        db.close()
+
         channel = f"transaction:{transaction_id}"
         await manager.connect(websocket, channel)
 
         # Notify channel that user joined
         await manager.send_to_channel(channel, {
             "type": "user_joined",
-            "user_id": str(user.id),
-            "name": f"{user.first_name} {user.last_name}".strip(),
+            "user_id": user_id,
+            "name": full_name,
         })
 
         try:
@@ -269,26 +277,30 @@ async def transaction_ws(
                     content = (data.get("content") or "").strip()[:4000]
                     if not content:
                         continue
-                    msg = ChatMessage(sender_id=user.id, transaction_id=transaction_id, message=content, attachments=[])
-                    db.add(msg)
-                    db.commit()
-                    db.refresh(msg)
-
                     from app.websocket.manager import build_chat_message_event
-                    await manager.send_to_channel(channel, build_chat_message_event(msg))
+                    mdb = SessionLocal()  # short-lived: only for this one write
+                    try:
+                        msg = ChatMessage(sender_id=user_id, transaction_id=transaction_id, message=content, attachments=[])
+                        mdb.add(msg)
+                        mdb.commit()
+                        mdb.refresh(msg)
+                        event = build_chat_message_event(msg)
+                    finally:
+                        mdb.close()
+                    await manager.send_to_channel(channel, event)
 
                 elif event_type == "typing":
                     await manager.send_to_channel(channel, {
                         "type": "typing",
-                        "user_id": str(user.id),
-                        "name": user.first_name,
+                        "user_id": user_id,
+                        "name": first_name,
                     })
 
         except WebSocketDisconnect:
             manager.disconnect(websocket, channel)
             await manager.send_to_channel(channel, {
                 "type": "user_left",
-                "user_id": str(user.id),
+                "user_id": user_id,
             })
     finally:
         db.close()
@@ -314,6 +326,7 @@ async def notifications_ws(
             return
 
         channel = f"user:{user.id}"
+        db.close()  # release the DB connection — the socket itself doesn't need it
         await manager.connect(websocket, channel)
 
         try:

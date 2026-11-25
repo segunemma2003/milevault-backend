@@ -5,8 +5,10 @@ from app.schemas.user import UserPublic
 
 
 class FundMilestoneBody(BaseModel):
-    """Omit amount to fund the remaining balance for this milestone."""
+    """Omit amount to fund the remaining balance. pay_from: another balance (e.g. "NGN") to
+    convert the shortfall from, at the platform rate."""
     amount: Optional[float] = None
+    pay_from: Optional[str] = None
 
 
 class DeliverySubmit(BaseModel):

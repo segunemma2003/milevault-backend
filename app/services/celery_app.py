@@ -18,6 +18,10 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,        # Acknowledge after completion (prevents loss on crash)
     worker_prefetch_multiplier=1,
+    broker_connection_retry_on_startup=True,
+    # Nothing reads task results. Storing them made every send subscribe to the Redis result
+    # channel, with its own ~20s retry loop when Redis is unreachable.
+    task_ignore_result=True,
     # Unrouted tasks (auto-release, every beat job) must land on a queue the worker consumes.
     task_default_queue="default",
     task_routes={
@@ -56,3 +60,11 @@ celery_app.conf.update(
 )
 
 import app.services.notification_dispatch  # noqa: E402,F401  (after-commit delivery for task notifications)
+
+
+def fail_fast_publishing() -> None:
+    """For the API process only: sending a job must never stall a web request. With Redis
+    unreachable, kombu's default reconnect loop held each request ~19s; give up at once instead
+    (the job is lost, so callers treat queueing as best-effort). The worker keeps the default,
+    so it rides out a Redis restart."""
+    celery_app.conf.broker_connection_max_retries = 1

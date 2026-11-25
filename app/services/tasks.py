@@ -466,7 +466,7 @@ def stale_deal_activity_warnings(self) -> dict:
         days = get_stale_activity_warn_days(db)
         cutoff = datetime.utcnow() - timedelta(days=days)
         q = db.query(Transaction).filter(
-            Transaction.status.in_(("active", "in_progress")),
+            Transaction.status.in_(("active", "in_progress", "awaiting_funding")),
             Transaction.updated_at < cutoff,
             Transaction.stale_activity_warn_sent_at.is_(None),
         )

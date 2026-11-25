@@ -186,7 +186,9 @@ def _get_exchange_rate(db: Session, from_code: str, to_code: str) -> float:
         ).first()
         if inverse:
             spread = 1 + (inverse.spread_percent / 100)
-            return round((1 / inverse.rate) * spread, 8)
+            # The spread is the platform's margin: it must make the conversion slightly worse for
+            # the user in both directions (it used to be multiplied in here, paying them extra).
+            return round(1 / (inverse.rate * spread), 8)
 
         raise HTTPException(
             status_code=422,

@@ -226,12 +226,30 @@ def create_transaction(
             },
         )
 
+    # Every deal is priced in USD (the platform base). A deal entered in another currency is
+    # converted once, at today's rate, and that rate is locked on the deal for the record.
+    entered_cur = (payload.currency or "USD").upper()
+    to_usd = 1.0
+    if entered_cur != "USD":
+        from app.routers.wallet import _get_exchange_rate
+        to_usd = _mid_rate(db, entered_cur, "USD")
+    deal_amount = round(float(payload.amount) * to_usd, 2)
+    if deal_amount <= 0:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Deal amount must be more than zero."})
+    ms_in = list(payload.milestones or [])
+    if ms_in:
+        ms_total = round(sum(float(m.amount) * to_usd for m in ms_in), 2)
+        if abs(ms_total - deal_amount) > 0.01:
+            raise HTTPException(status_code=422, detail={
+                "error": "MILESTONES_DONT_ADD_UP",
+                "message": f"Milestones add up to {ms_total:,.2f} but the deal is {deal_amount:,.2f} USD."})
+
     tx = Transaction(
         title=payload.title,
         description=payload.description,
-        amount=payload.amount,
-        currency=payload.currency,
-        type=payload.type,
+        amount=deal_amount,
+        currency="USD",
+        type="milestone" if len(ms_in) > 1 else "one_time",
         buyer_id=buyer_id,
         seller_id=seller_id,
         initiated_by_user_id=current_user.id,
@@ -243,35 +261,26 @@ def create_transaction(
         notes=payload.notes,
         supporting_url=payload.supporting_url,
         status="pending_approval",
-        milestones_count=len(payload.milestones or []),
+        milestones_count=max(len(ms_in), 1),
     )
     db.add(tx)
     db.flush()
 
-    try:
-        from app.routers.wallet import _get_exchange_rate
+    tx.locked_exchange_rate = to_usd
+    tx.locked_rate_from = entered_cur
+    tx.locked_rate_to = "USD"
 
-        cur = (payload.currency or "USD").upper()
-        if cur == "USD":
-            tx.locked_exchange_rate = 1.0
-            tx.locked_rate_from = "USD"
-            tx.locked_rate_to = "USD"
-        else:
-            tx.locked_exchange_rate = _get_exchange_rate(db, cur, "USD")
-            tx.locked_rate_from = cur
-            tx.locked_rate_to = "USD"
-    except HTTPException:
-        tx.locked_exchange_rate = None
-        tx.locked_rate_from = None
-        tx.locked_rate_to = None
-
-    for m in (payload.milestones or []):
+    if not ms_in:
+        # A deal without milestones is one payment, released in full when the buyer approves.
+        db.add(Milestone(transaction_id=tx.id, title="Full payment", description=payload.description,
+                         amount=deal_amount, currency="USD", due_date=payload.expected_completion_date))
+    for m in ms_in:
         milestone = Milestone(
             transaction_id=tx.id,
             title=m.title,
             description=m.description,
-            amount=m.amount,
-            currency=m.currency or payload.currency,
+            amount=round(float(m.amount) * to_usd, 2),
+            currency="USD",
             due_date=m.due_date,
             expectations=m.expectations,
             percentage_of_total=m.percentage_of_total,
@@ -653,6 +662,153 @@ def remind_counterparty(
 #  BUYER: Fund a milestone (moves funds from available → escrow)
 # ══════════════════════════════════════════════════════════════════
 
+FUNDABLE_STATUSES = ("funding_in_progress", "partially_funded", "active", "approved", "in_progress", "awaiting_funding")
+
+
+def _mid_rate(db: Session, from_code: str, to_code: str) -> float:
+    """Rate without the platform spread (used to price deals and to show amounts)."""
+    from app.routers.wallet import _get_exchange_rate
+    if from_code == to_code:
+        return 1.0
+    from app.models.currency import Currency, ExchangeRate
+    f = db.query(Currency).filter(Currency.code == from_code).first()
+    t = db.query(Currency).filter(Currency.code == to_code).first()
+    if f and t:
+        row = db.query(ExchangeRate).filter(ExchangeRate.from_currency_id == f.id, ExchangeRate.to_currency_id == t.id,
+                                            ExchangeRate.is_active == True).first()  # noqa: E712
+        if row:
+            return float(row.rate)
+        inv = db.query(ExchangeRate).filter(ExchangeRate.from_currency_id == t.id, ExchangeRate.to_currency_id == f.id,
+                                            ExchangeRate.is_active == True).first()  # noqa: E712
+        if inv and inv.rate:
+            return 1.0 / float(inv.rate)
+    return _get_exchange_rate(db, from_code, to_code)
+
+
+def _cover_from_other_currency(db: Session, user: User, currency: str, need: float, pay_from: Optional[str]) -> Optional[dict]:
+    """
+    If the buyer chose to pay from another balance (e.g. their naira), convert just the shortfall
+    into the deal currency first, at the platform rate (spread included). Returns what was
+    converted, or None if nothing was needed.
+    """
+    from decimal import ROUND_UP
+    from app.routers.wallet import _get_exchange_rate
+    src = (pay_from or "").upper()
+    if not src or src == currency:
+        return None
+    have = ledger.to_decimal(ledger.lock_balance(db, user_id=user.id, currency=currency).amount or 0)
+    shortfall = ledger.to_decimal(need) - have
+    if shortfall <= 0:
+        return None
+    # Priced as users think of it: 1 USD costs `rate` NGN (platform spread included).
+    rate = ledger.to_decimal(_get_exchange_rate(db, currency, src))
+    src_amount = (shortfall * rate).quantize(ledger.to_decimal("0.01"), rounding=ROUND_UP)
+    try:
+        ledger.debit(db, user_id=user.id, currency=src, amount=src_amount, from_bucket="available",
+                     reference_type="fx_convert", description=f"Convert {src} → {currency} (1 {currency} = {rate} {src}) to fund a deal")
+    except InsufficientFunds as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={
+            "error": "INSUFFICIENT_FUNDS",
+            "message": f"Not enough {src}: you have {float(e.have):,.2f}, need {float(src_amount):,.2f} ({currency} {float(shortfall):,.2f})."})
+    ledger.credit(db, user_id=user.id, currency=currency, amount=shortfall, to_bucket="available",
+                  reference_type="fx_convert", description=f"Convert {src} → {currency} (1 {currency} = {rate} {src}) to fund a deal")
+    db.add(WalletTransaction(user_id=user.id, type="conversion", amount=float(src_amount), currency=src, status="completed",
+                             description=f"Converted {src} {float(src_amount):,.2f} → {currency} {float(shortfall):,.2f} (1 {currency} = {rate} {src}) to fund a deal"))
+    return {"from": src, "amount": float(src_amount), "to": currency, "converted": float(shortfall), "rate": float(rate)}
+
+
+def _fund_milestone_core(db: Session, tx: Transaction, milestone: Milestone, user: User, amount: Optional[float]) -> tuple:
+    """Move up to the milestone's remaining amount from the buyer's available balance into escrow.
+    Returns (paid, became_fully_funded). The milestone row must already be locked."""
+    currency = milestone.currency or tx.currency
+    target = float(milestone.amount)
+    already = float(milestone.funded_amount or 0)
+    remaining = round(target - already, 8)
+    if milestone.is_funded or remaining <= 0:
+        return 0.0, False
+    pay = round(min(float(amount) if amount is not None else remaining, remaining), 8)
+    if pay <= 0:
+        return 0.0, False
+    pay = float(ledger.quantize(pay, currency, db))
+    try:
+        ledger.move(
+            db, user_id=user.id, currency=currency, amount=pay,
+            from_bucket="available", to_bucket="escrow",
+            reference_type="milestone_fund", reference_id=milestone.id,
+            description=f"Escrow lock for milestone '{milestone.title}'",
+        )
+    except InsufficientFunds as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={
+            "error": "INSUFFICIENT_FUNDS",
+            "message": f"Insufficient balance. You have {currency} {float(e.have):.2f}, need {currency} {pay:.2f}. Deposit funds, or pay from another balance.",
+        })
+    new_funded = round(already + pay, 8)
+    milestone.funded_amount = new_funded
+    became = new_funded >= target - 1e-9
+    if became:
+        milestone.is_funded = True
+        milestone.status = "funded"
+        milestone.funded_amount = target
+        tx.funded_milestones = (tx.funded_milestones or 0) + 1
+    else:
+        milestone.is_funded = False
+        milestone.status = "pending"
+    db.add(WalletTransaction(
+        user_id=user.id, type="escrow_lock", amount=pay, currency=currency, status="completed",
+        transaction_id=tx.id, milestone_id=milestone.id, description=f"Escrow for milestone: {milestone.title}",
+    ))
+    return pay, became
+
+
+def _ordered_milestones(db: Session, tx_id: str) -> list:
+    return db.query(Milestone).filter(Milestone.transaction_id == tx_id).order_by(
+        Milestone.created_at.asc(), Milestone.id.asc()).all()
+
+
+def _after_funding(db: Session, tx: Transaction, newly_full: list, paid_total: float, currency: str) -> None:
+    """Deal status + notifications after money went into escrow."""
+    was_paused = tx.status == "awaiting_funding"
+    ms = _ordered_milestones(db, tx.id)
+    if any(m.is_funded and m.status != "completed" for m in ms):
+        if tx.status in ("funding_in_progress", "partially_funded", "approved", "awaiting_funding"):
+            tx.status = "active"
+    elif any((m.funded_amount or 0) > 0 and not m.is_funded for m in ms) and tx.status in ("funding_in_progress", "approved"):
+        tx.status = "partially_funded"
+    if not tx.seller_id:
+        return
+    if newly_full:
+        names = ", ".join(f"'{m.title}'" for m in newly_full)
+        title = "Deal resumed — milestone funded" if was_paused else "Milestone funded — you can start"
+        create_notification(
+            db, tx.seller_id, title,
+            f"{names} in '{tx.title}' is fully paid ({currency} {paid_total:,.2f} added to escrow). You can start work.",
+            "transaction", related_item_id=tx.id, related_item_type="transaction")
+    else:
+        create_notification(
+            db, tx.seller_id, "Partial payment received",
+            f"{currency} {paid_total:,.2f} added to escrow for '{tx.title}'. Work can start once a milestone is 100% paid.",
+            "transaction", related_item_id=tx.id, related_item_type="transaction")
+
+
+def _buyer_fund_guard(db: Session, transaction_id: str, user: User) -> Transaction:
+    from app.services.funding_deadline_enforcement import enforce_funding_deadline_if_due
+    fd_out = enforce_funding_deadline_if_due(db, transaction_id)
+    if fd_out.get("commit"):
+        db.commit()
+    if user.wallet_frozen:
+        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if tx.buyer_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the buyer can fund milestones")
+    if tx.status not in FUNDABLE_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot fund milestones in transaction status '{tx.status}'")
+    return tx
+
+
 @router.post("/{transaction_id}/milestones/{milestone_id}/fund")
 def fund_milestone(
     transaction_id: str,
@@ -662,26 +818,10 @@ def fund_milestone(
     db: Session = Depends(get_db),
 ):
     """
-    Buyer funds a milestone (full or partial). Funds stay inactive until the milestone is 100% funded.
-    Transaction becomes Active when ≥1 milestone is fully funded.
+    Buyer funds a milestone (full or partial). Work on a milestone can only start once it is
+    100% funded. Optional pay_from (e.g. "NGN") converts the shortfall from that balance first.
     """
-    from app.services.funding_deadline_enforcement import enforce_funding_deadline_if_due
-
-    fd_out = enforce_funding_deadline_if_due(db, transaction_id)
-    if fd_out.get("commit"):
-        db.commit()
-
-    if current_user.wallet_frozen:
-        raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
-
-    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-    if tx.buyer_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the buyer can fund milestones")
-    if tx.status not in ("funding_in_progress", "partially_funded", "active", "approved"):
-        raise HTTPException(status_code=409, detail=f"Cannot fund milestones in transaction status '{tx.status}'")
-
+    tx = _buyer_fund_guard(db, transaction_id, current_user)
     # Lock the milestone row: concurrent fund requests for the same milestone serialise here,
     # so each one sees the other's funded_amount (no lost update / double charge).
     milestone = db.query(Milestone).filter(
@@ -689,89 +829,99 @@ def fund_milestone(
     ).with_for_update().first()
     if not milestone:
         raise HTTPException(status_code=404, detail="Milestone not found")
-    if milestone.is_funded:
+    if milestone.is_funded or float(milestone.amount) - float(milestone.funded_amount or 0) <= 0:
         raise HTTPException(status_code=409, detail="Milestone is already fully funded")
-
-    currency = milestone.currency or tx.currency
-    target = float(milestone.amount)
-    already = float(milestone.funded_amount or 0)
-    remaining = round(target - already, 8)
-    if remaining <= 0:
-        raise HTTPException(status_code=409, detail="Milestone is already fully funded")
-
-    pay_raw = body.amount if body.amount is not None else remaining
-    pay = round(min(float(pay_raw), remaining), 8)
-    if pay <= 0:
+    if body.amount is not None and body.amount <= 0:
         raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Funding amount must be greater than zero."})
 
-    pay = float(ledger.quantize(pay, currency, db))
-    try:
-        ledger.move(
-            db, user_id=current_user.id, currency=currency, amount=pay,
-            from_bucket="available", to_bucket="escrow",
-            reference_type="milestone_fund", reference_id=milestone_id,
-            description=f"Escrow lock for milestone '{milestone.title}'",
-        )
-    except InsufficientFunds as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "INSUFFICIENT_FUNDS",
-                "message": f"Insufficient balance. You have {currency} {float(e.have):.2f}, need {currency} {pay:.2f}. Please deposit funds first.",
-            },
-        )
-
-    new_funded = round(already + pay, 8)
-    milestone.funded_amount = new_funded
-    became_fully_funded = new_funded >= target - 1e-9
-    if became_fully_funded:
-        milestone.is_funded = True
-        milestone.status = "funded"
-        milestone.funded_amount = target
-        tx.funded_milestones = (tx.funded_milestones or 0) + 1
-    else:
-        milestone.is_funded = False
-        milestone.status = "pending"
-
-    db.add(
-        WalletTransaction(
-            user_id=current_user.id,
-            type="escrow_lock",
-            amount=pay,
-            currency=currency,
-            status="completed",
-            transaction_id=transaction_id,
-            milestone_id=milestone_id,
-            description=f"Escrow for milestone: {milestone.title}",
-        )
-    )
-
-    all_ms = db.query(Milestone).filter(Milestone.transaction_id == tx.id).all()
-    if any(m.is_funded for m in all_ms):
-        tx.status = "active"
-    elif any((m.funded_amount or 0) > 0 and not m.is_funded for m in all_ms):
-        tx.status = "partially_funded"
-
-    if tx.seller_id:
-        create_notification(
-            db,
-            tx.seller_id,
-            "Milestone funding received",
-            f"'{milestone.title}' in '{tx.title}': {currency} {pay:.2f} added to escrow"
-            + (" — fully funded; you can start work." if became_fully_funded else " (partial — milestone not active until 100% funded)."),
-            "transaction",
-            related_item_id=tx.id,
-            related_item_type="transaction",
-        )
-
+    currency = milestone.currency or tx.currency
+    remaining = round(float(milestone.amount) - float(milestone.funded_amount or 0), 8)
+    want = min(float(body.amount), remaining) if body.amount is not None else remaining
+    converted = _cover_from_other_currency(db, current_user, currency, want, body.pay_from)
+    pay, became = _fund_milestone_core(db, tx, milestone, current_user, want)
+    _after_funding(db, tx, [milestone] if became else [], pay, currency)
     db.commit()
     return {
-        "message": f"Milestone '{milestone.title}' funded." + (" Work may begin." if became_fully_funded else " Partial funding recorded."),
+        "message": f"Milestone '{milestone.title}' funded." + (" Work may begin." if became else " Partial funding recorded."),
         "funded_amount": milestone.funded_amount,
         "is_funded": milestone.is_funded,
         "currency": currency,
+        "converted": converted,
+        "deal_status": tx.status,
     }
+
+
+@router.post("/{transaction_id}/fund")
+def fund_deal(
+    transaction_id: str,
+    body: FundMilestoneBody = Body(default=FundMilestoneBody()),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Pay the whole deal at once (omit amount), or any amount: it fills milestones in order,
+    first to last. Money still releases milestone by milestone. A milestone only becomes
+    workable once it is 100% paid — an amount that covers no milestone fully starts nothing.
+    """
+    tx = _buyer_fund_guard(db, transaction_id, current_user)
+    ms = [m for m in db.query(Milestone).filter(Milestone.transaction_id == tx.id)
+          .order_by(Milestone.created_at.asc(), Milestone.id.asc()).with_for_update().all()
+          if not m.is_funded and m.status != "completed"]
+    outstanding = round(sum(float(m.amount) - float(m.funded_amount or 0) for m in ms), 8)
+    if outstanding <= 0:
+        raise HTTPException(status_code=409, detail="This deal is already fully paid.")
+    if body.amount is not None and body.amount <= 0:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Funding amount must be greater than zero."})
+    budget = min(float(body.amount), outstanding) if body.amount is not None else outstanding
+    currency = tx.currency or "USD"
+    converted = _cover_from_other_currency(db, current_user, currency, budget, body.pay_from)
+
+    paid_total, newly_full, left = 0.0, [], budget
+    for m in ms:
+        if left <= 1e-9:
+            break
+        pay, became = _fund_milestone_core(db, tx, m, current_user, left)
+        paid_total = round(paid_total + pay, 8)
+        left = round(left - pay, 8)
+        if became:
+            newly_full.append(m)
+    _after_funding(db, tx, newly_full, paid_total, currency)
+    db.commit()
+    return {
+        "message": (f"{currency} {paid_total:,.2f} paid into escrow. "
+                    + (f"{len(newly_full)} milestone(s) fully funded — work can start." if newly_full
+                       else "No milestone is fully paid yet, so work can't start until one is.")),
+        "paid": paid_total, "fully_funded": [m.id for m in newly_full], "outstanding": round(outstanding - paid_total, 2),
+        "currency": currency, "converted": converted, "deal_status": tx.status,
+    }
+
+
+@router.post("/{transaction_id}/request-start")
+def request_start(
+    transaction_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Buyer nudges the seller to start a milestone that is fully paid but not started yet."""
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if tx.buyer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the buyer can ask the seller to start")
+    ready = [m for m in _ordered_milestones(db, tx.id) if m.is_funded and m.status == "funded"]
+    if not ready or not tx.seller_id:
+        raise HTTPException(status_code=409, detail={"error": "NOTHING_TO_START",
+                            "message": "There's no fully paid milestone waiting to start. Pay a milestone in full first."})
+    now = datetime.utcnow()
+    if tx.last_reminded_at and now - tx.last_reminded_at < timedelta(hours=1):
+        raise HTTPException(status_code=429, detail={"error": "TOO_SOON", "message": "You already asked within the last hour."})
+    tx.last_reminded_at = now
+    create_notification(
+        db, tx.seller_id, "Buyer asked you to start",
+        f"{current_user.first_name} has paid for '{ready[0].title}' in '{tx.title}' and asked you to start work.",
+        "transaction", related_item_id=tx.id, related_item_type="transaction")
+    db.commit()
+    return {"message": "We've let the seller know you'd like them to start."}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1008,7 +1158,7 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
     _update_reputation(db, tx.buyer_id)
 
     # Check if all milestones complete
-    all_milestones = db.query(Milestone).filter(Milestone.transaction_id == tx.id).all()
+    all_milestones = _ordered_milestones(db, tx.id)
     if all(m.status == "completed" for m in all_milestones):
         tx.status = "completed"
         # Update total volume
@@ -1025,6 +1175,32 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         f"Your payment of {currency} {amount:.2f} for '{milestone.title}' has been released to your wallet.",
         "transaction", related_item_id=tx.id, related_item_type="transaction",
     )
+    create_notification(
+        db, tx.buyer_id,
+        "Milestone completed",
+        f"'{milestone.title}' is complete and {currency} {amount:.2f} was released to the seller.",
+        "transaction", related_item_id=tx.id, related_item_type="transaction",
+    )
+
+    # Next milestone not fully paid and nothing else paid in escrow → pause the deal until it is.
+    if tx.status != "completed":
+        open_ms = [m for m in all_milestones if m.status != "completed"]
+        if open_ms and not any(m.is_funded for m in open_ms):
+            nxt = open_ms[0]
+            due = round(float(nxt.amount) - float(nxt.funded_amount or 0), 2)
+            tx.status = "awaiting_funding"
+            create_notification(
+                db, tx.buyer_id, "Deal paused — fund the next milestone",
+                f"'{tx.title}' is paused until '{nxt.title}' is fully paid ({currency} {due:,.2f} to go).",
+                "transaction", related_item_id=tx.id, related_item_type="transaction",
+            )
+            if tx.seller_id:
+                create_notification(
+                    db, tx.seller_id, "Deal paused",
+                    f"'{tx.title}' is paused until the buyer pays for '{nxt.title}'. We'll tell you when it's funded.",
+                    "transaction", related_item_id=tx.id, related_item_type="transaction",
+                )
+    return True
 
 
 def _update_reputation(db: Session, user_id: str):
