@@ -38,15 +38,18 @@ def _ref() -> str:
     return "BDR-" + "".join(secrets.choice(alphabet) for _ in range(6))
 
 
-def _send(to_email: str, subject: str, body_html: str, reply_to: Optional[str] = None) -> None:
-    """Direct Resend call (no Celery dependency). Logs the outcome."""
+def _send(to_email: str, subject: str, body_html: str, reply_to: Optional[str] = None,
+          as_support: bool = False) -> None:
+    """Direct Resend call (no Celery dependency). Logs the outcome.
+    as_support=True sends from "Bondrova Support <support@…>" so customer replies come back to the inbox."""
     from app.services.email_template import render_email, sender
     if not settings.RESEND_API_KEY:
         logger.warning("[SUPPORT EMAIL NOT SENT — no RESEND_API_KEY] to=%s subject=%r", to_email, subject)
         return
     try:
         import httpx
-        payload = {"from": sender(), "to": [to_email], "subject": subject, "html": render_email(body_html)}
+        from_addr = f"Bondrova Support <{settings.SUPPORT_FROM_EMAIL}>" if as_support else sender()
+        payload = {"from": from_addr, "to": [to_email], "subject": subject, "html": render_email(body_html)}
         if reply_to:
             payload["reply_to"] = reply_to
         r = httpx.post("https://api.resend.com/emails", json=payload,
@@ -79,7 +82,7 @@ def _ack_customer(ref: str, name: str, email: str, subject: str) -> None:
         f"<p>We usually reply within one business day (Mon–Fri, 8am–5pm WAT).</p>"
         f"<p style='color:#6b7280'>Subject: {html.escape(subject)}</p>"
     )
-    _send(email, f"[{ref}] We've received your message", body)
+    _send(email, f"[{ref}] We've received your message", body, as_support=True)
 
 
 @router.post("/contact", status_code=200)
@@ -108,6 +111,7 @@ def _ticket_out(t: SupportTicket, replies=None):
     if replies is not None:
         out["replies"] = [{"id": r.id, "author_role": r.author_role, "body": r.body, "created_at": r.created_at}
                           for r in replies]
+        out["origin"] = "outbound" if t.message.startswith("[Sent by Bondrova Support]") else "inbound"
     return out
 
 
@@ -144,7 +148,7 @@ def reply(ticket_id: str, background: BackgroundTasks, body: str = Body(..., emb
         f"<p style='color:#6b7280'>— Bondrova Support · Ref {html.escape(t.reference)}<br/>"
         f"Reply to this email if you need anything else.</p>"
     )
-    background.add_task(_send, t.email, f"Re: [{t.reference}] {t.subject}", html_body, settings.SUPPORT_INBOX_EMAIL)
+    background.add_task(_send, t.email, f"Re: [{t.reference}] {t.subject}", html_body, None, True)
     return {"ok": True, "status": t.status}
 
 
@@ -159,3 +163,123 @@ def set_status(ticket_id: str, status: str = Body(..., embed=True), db: Session 
     t.status = status
     db.commit()
     return {"ok": True}
+
+
+# ─── Inbound email (Cloudflare Email Worker → here) ───────────────────────────
+
+import re as _re
+from email import policy as _policy
+from email.parser import BytesParser as _BytesParser
+from email.utils import parseaddr as _parseaddr
+
+from fastapi import Header as _Header, Request as _Request
+
+_REF_RE = _re.compile(r"\[(BDR-[A-Z0-9]{6})\]")
+
+
+def _strip_quoted(text: str) -> str:
+    """Drop the quoted previous message most mail apps add below a reply."""
+    out = []
+    for line in text.splitlines():
+        if _re.match(r"^\s*On .+ wrote:\s*$", line) or line.strip().startswith("-----Original Message-----"):
+            break
+        if line.lstrip().startswith(">"):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def _plain_body(msg) -> str:
+    part = msg.get_body(preferencelist=("plain", "html"))
+    if part is None:
+        return ""
+    content = part.get_content()
+    if part.get_content_type() == "text/html":
+        content = _re.sub(r"<br\s*/?>|</p>", "\n", content, flags=_re.I)
+        content = html.unescape(_re.sub(r"<[^>]+>", "", content))
+    return content
+
+
+def _notify_admins(db: Session, title: str, message: str, ticket_id: str) -> None:
+    from app.services.notification_service import create_notification
+    for admin in db.query(User).filter(User.is_admin.is_(True)).all():
+        create_notification(db, str(admin.id), title, message, "support", ticket_id, "support_ticket")
+
+
+@router.post("/support/inbound", include_in_schema=False)
+async def inbound_email(request: _Request, db: Session = Depends(get_db),
+                        x_inbound_secret: Optional[str] = _Header(default=None)):
+    """
+    Raw email (RFC 822) posted by the Cloudflare Email Worker for support@.
+    A subject containing [BDR-XXXXXX] is added to that ticket's thread; anything else opens a new ticket.
+    """
+    import hmac as _hmac
+    if not settings.SUPPORT_INBOUND_SECRET or not x_inbound_secret or \
+            not _hmac.compare_digest(settings.SUPPORT_INBOUND_SECRET, x_inbound_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    raw = await request.body()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Email too large")
+
+    msg = _BytesParser(policy=_policy.default).parsebytes(raw)
+    from_name, from_email = _parseaddr(str(msg.get("From", "")))
+    from_email = (from_email or "").lower()
+    subject = str(msg.get("Subject", "") or "(no subject)").strip()[:200]
+
+    # Our own system mail (ticket alerts from noreply@, mail sent as support@) must not loop back in.
+    if from_email.endswith("@bondrova.com"):
+        return {"ok": True, "outcome": "ignored_own_domain"}
+
+    body = _strip_quoted(_plain_body(msg))[:20000] or "(empty message)"
+
+    m = _REF_RE.search(subject)
+    ticket = db.query(SupportTicket).filter(SupportTicket.reference == m.group(1)).first() if m else None
+    if ticket and ticket.email.lower() == from_email:
+        db.add(SupportReply(ticket_id=ticket.id, author_role="customer", body=body))
+        ticket.status = "open"
+        ticket.updated_at = datetime.utcnow()
+        db.commit()
+        _notify_admins(db, f"Customer replied — {ticket.reference}", f"{ticket.name}: {body[:140]}", ticket.id)
+        return {"ok": True, "outcome": "reply_added", "reference": ticket.reference}
+
+    ticket = SupportTicket(reference=_ref(), name=(from_name or from_email.split("@")[0])[:120], email=from_email,
+                           subject=subject, message=body)
+    user = db.query(User).filter(User.email == from_email).first()
+    if user:
+        ticket.user_id = user.id
+    db.add(ticket)
+    db.commit()
+    _notify_admins(db, f"New support email — {ticket.reference}", f"{ticket.name}: {subject}", ticket.id)
+    return {"ok": True, "outcome": "ticket_created", "reference": ticket.reference}
+
+
+# ─── Compose: email anyone as Bondrova Support ────────────────────────────────
+
+class ComposeRequest(BaseModel):
+    to: EmailStr
+    name: Optional[str] = Field(None, max_length=120)
+    subject: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=10000)
+
+
+@router.post("/admin/support/compose")
+def compose(payload: ComposeRequest, background: BackgroundTasks, db: Session = Depends(get_db),
+            admin: User = Depends(get_current_admin)):
+    """Start a new conversation from support@. It becomes a ticket so the customer's reply threads back."""
+    to = payload.to.lower()
+    user = db.query(User).filter(User.email == to).first()
+    name = (payload.name or (f"{user.first_name} {user.last_name}" if user else to.split("@")[0])).strip()
+    ticket = SupportTicket(reference=_ref(), name=name[:120], email=to, subject=payload.subject.strip(),
+                           message="[Sent by Bondrova Support]", status="answered",
+                           user_id=user.id if user else None)
+    db.add(ticket)
+    db.flush()
+    db.add(SupportReply(ticket_id=ticket.id, author_id=admin.id, author_role="admin", body=payload.body.strip()))
+    db.commit()
+    html_body = (
+        f"<p>Hi {html.escape(name.split(' ')[0])},</p>"
+        f"<p>{html.escape(payload.body.strip()).replace(chr(10), '<br/>')}</p>"
+        f"<p style='color:#6b7280'>— Bondrova Support · Ref {html.escape(ticket.reference)}</p>"
+    )
+    background.add_task(_send, to, f"[{ticket.reference}] {ticket.subject}", html_body, None, True)
+    return {"ok": True, "id": ticket.id, "reference": ticket.reference}

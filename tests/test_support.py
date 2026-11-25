@@ -46,3 +46,66 @@ def test_admin_reply_marks_answered(db):
     contact.reply(t.id, bg, "Fees are 2.5%.", False, db, admin)
     db.refresh(t)
     assert t.status == "answered" and db.query(SupportReply).count() == 1 and len(bg.tasks) == 1
+
+
+# ─── Inbound email & compose ──────────────────────────────────────────────────
+
+import asyncio
+from email.message import EmailMessage
+
+from fastapi import HTTPException
+
+from app.config import settings
+
+
+class _Req:
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def body(self):
+        return self._raw
+
+
+def _mail(frm, subject, text):
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"] = frm, "support@bondrova.com", subject
+    m.set_content(text)
+    return m.as_bytes()
+
+
+def _inbound(db, raw, secret="s3cret"):
+    return asyncio.run(contact.inbound_email(_Req(raw), db, secret))
+
+
+def test_inbound_new_email_creates_ticket_and_reply_threads(db, monkeypatch):
+    monkeypatch.setattr(settings, "SUPPORT_INBOUND_SECRET", "s3cret")
+    out = _inbound(db, _mail("Ada Obi <ada@gmail.com>", "Where is my money?", "Hello, I funded a deal yesterday."))
+    assert out["outcome"] == "ticket_created"
+    t = db.query(SupportTicket).one()
+    assert t.email == "ada@gmail.com" and t.name == "Ada Obi" and "funded a deal" in t.message
+
+    reply = _mail("ada@gmail.com", f"Re: [{t.reference}] Where is my money?",
+                  "Thanks, got it now.\n\nOn Tue, 24 Nov 2026 Bondrova Support wrote:\n> old text")
+    assert _inbound(db, reply)["outcome"] == "reply_added"
+    r = db.query(SupportReply).one()
+    assert r.author_role == "customer" and r.body == "Thanks, got it now."
+
+
+def test_inbound_ignores_own_domain_and_bad_secret(db, monkeypatch):
+    monkeypatch.setattr(settings, "SUPPORT_INBOUND_SECRET", "s3cret")
+    assert _inbound(db, _mail("noreply@bondrova.com", "[BDR-AAAAAA] alert", "x"))["outcome"] == "ignored_own_domain"
+    with pytest.raises(HTTPException):
+        _inbound(db, _mail("a@b.com", "hi", "x"), secret="wrong")
+    assert db.query(SupportTicket).count() == 0
+
+
+def test_compose_creates_outbound_ticket(db):
+    admin = User(id=str(uuid.uuid4()), first_name="A", last_name="D", email="adm@x.com", hashed_password="x",
+                 role="buyer", is_admin=True)
+    db.add(admin)
+    db.commit()
+    bg = BackgroundTasks()
+    out = contact.compose(contact.ComposeRequest(to="Client@Example.com", subject="Your KYC", body="Please re-upload."), bg, db, admin)
+    t = db.query(SupportTicket).one()
+    assert t.reference == out["reference"] and t.email == "client@example.com" and t.status == "answered"
+    assert db.query(SupportReply).count() == 1 and len(bg.tasks) == 1

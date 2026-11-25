@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     ADMIN_SECRET: str = "change-this-admin-bootstrap-secret"
     # Where contact-form tickets are emailed (Cloudflare Email Routing can forward it to Gmail).
     SUPPORT_INBOX_EMAIL: str = "support@bondrova.com"
+    # Address support replies/compose are sent FROM (domain must be verified in Resend).
+    SUPPORT_FROM_EMAIL: str = "support@bondrova.com"
+    # Shared secret between the Cloudflare Email Worker and POST /support/inbound.
+    SUPPORT_INBOUND_SECRET: str = ""
 
     # Rate limiting (requests per window)
     RATE_LIMIT_AUTH: str = "10/minute"
