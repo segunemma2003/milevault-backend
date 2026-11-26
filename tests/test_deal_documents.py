@@ -63,7 +63,7 @@ def test_outsider_cannot_see_documents(db):
         D.get_contract(tx.id, x, db)
     assert e.value.status_code == 403
     with pytest.raises(HTTPException):
-        D.receipt_document(tx.id, None, x, db)
+        D.receipt_document(tx.id, None, None, x, db)
 
 
 def test_receipt_uses_the_buyers_logo_template_and_real_payments(db):
@@ -75,10 +75,10 @@ def test_receipt_uses_the_buyers_logo_template_and_real_payments(db):
     T.fund_deal(tx.id, FundMilestoneBody(), b, db)
     T._release_milestone_escrow(db, tx, ms[0]); db.commit()
 
-    page = D.receipt_document(tx.id, None, s, db).body.decode()
+    page = D.receipt_document(tx.id, None, None, s, db).body.decode()
     assert "https://cdn.example/logo.png" in page and "Ade Stores" in page and "#0f766e" in page   # modern
     assert "Paid into escrow" in page and "Released to seller" in page and "USD 50.00" in page
-    minimal = D.receipt_document(tx.id, "minimal", b, db).body.decode()
+    minimal = D.receipt_document(tx.id, "minimal", None, b, db).body.decode()
     assert "#0f766e" not in minimal
     assert "sent to buyer@x.com" in D.email_receipt(tx.id, D.ReceiptEmailBody(template="classic"), b, db)["message"]
 
@@ -162,7 +162,7 @@ def test_receipt_never_shows_fees_as_money_still_in_escrow(db):
     T.fund_deal(tx.id, FundMilestoneBody(), b, db)
     sm = DD.receipt_summary(db, tx)
     assert sm["paid_into_escrow"] == 105 and sm["held_in_escrow"] == 105 and sm["released_to_seller"] == 0
-    page = D.receipt_document(tx.id, None, b, db).body.decode()
+    page = D.receipt_document(tx.id, None, None, b, db).body.decode()
     assert "Escrow statement" in page and "has <strong>not</strong> been" in page   # nothing implied as paid
 
     T._release_milestone_escrow(db, tx, db.get(Milestone, m1.id)); db.commit()
@@ -177,7 +177,7 @@ def test_documents_carry_a_code_that_anyone_can_verify(db):
     docs = D.list_documents(tx.id, b, db)
     code = docs["receipt"]["code"]
     assert code.startswith("BDR-") and docs["contract_code"].startswith("BDR-")
-    page = D.receipt_document(tx.id, None, b, db).body.decode()
+    page = D.receipt_document(tx.id, None, None, b, db).body.decode()
     assert code in page and "<svg" in page and f"/verify/{code}" in page        # QR + link on the document
     assert D.list_documents(tx.id, s, db)["receipt"]["code"] == code               # same figures → same code
 
@@ -253,3 +253,17 @@ def test_nothing_is_emailed_if_the_transaction_rolls_back(db, monkeypatch):
     db.rollback()
     db.commit()                                                                    # later commit: still nothing
     assert sent == []
+
+
+def test_receipt_is_shown_in_the_readers_chosen_currency(db):
+    from app.models.user import UserSettings
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    db.add(UserSettings(user_id=s.id, default_currency="NGN")); db.commit()
+    tx, ms = deal(db, b, s, 50)
+    deposit(db, b, "USD", 50)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+
+    seller_view = D.receipt_document(tx.id, None, None, s, db).body.decode()   # NGN at 1,500
+    assert "NGN 75,000.00" in seller_view and "USD 50.00" in seller_view and "1 USD = 1,500.00 NGN" in seller_view
+    buyer_view = D.receipt_document(tx.id, None, None, b, db).body.decode()    # no preference → deal currency
+    assert "NGN" not in buyer_view and "USD 50.00" in buyer_view

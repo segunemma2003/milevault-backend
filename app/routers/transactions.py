@@ -722,9 +722,18 @@ def decline_transaction(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    from app.services.deal_cancellation import PRE_START_STATUSES
+    if tx.status not in PRE_START_STATUSES:
+        # Declining is only for an invitation. A started deal is cancelled only by agreement
+        # (otherwise the invitee could end it alone and leave the buyer's money locked in escrow).
+        raise HTTPException(status_code=409, detail={
+            "error": "CANCEL_REQUIRES_AGREEMENT" if tx.status not in ("completed", "cancelled", "refunded", "declined", "expired") else "DEAL_CLOSED",
+            "message": "This deal has already started. To end it, send a cancellation request; the other party must agree."
+            if tx.status not in ("completed", "cancelled", "refunded", "declined", "expired") else f"This deal is already {tx.status}.",
+        })
     initiator = getattr(tx, "initiated_by_user_id", None)
     if initiator:
         if current_user.id == initiator:

@@ -113,3 +113,15 @@ def test_outsiders_and_disputed_deals_are_blocked(db):
     with pytest.raises(HTTPException) as e:
         accept(db, tx, s)
     assert err(e) == "DEAL_DISPUTED"
+
+
+def test_started_deal_cannot_be_ended_by_declining_it(db):
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, _ = deal(db, b, s, 50)
+    deposit(db, b, "USD", 50)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+    with pytest.raises(HTTPException) as e:
+        T.decline_transaction(tx.id, None, s, db)
+    assert err(e) == "CANCEL_REQUIRES_AGREEMENT"
+    db.refresh(tx)
+    assert tx.status == "active" and avail(db, b, "USD") == (Decimal("0"), Decimal("50"))

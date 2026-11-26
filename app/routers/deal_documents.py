@@ -60,7 +60,7 @@ class SignBody(BaseModel):
 
 @router.get("/{transaction_id}/contract", summary="The deal's contract (generated from its current terms)")
 def get_contract(transaction_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    tx = _deal(db, transaction_id, current_user)
+    tx = _deal(db, transaction_id, current_user, lock=True)  # one new version even if opened twice at once
     c = dd.current_contract(db, tx)
     db.commit()
     return {"contract": dd.contract_to_dict(c), "contract_signed": bool(tx.contract_signed)}
@@ -90,7 +90,7 @@ def sign_contract(transaction_id: str, body: SignBody, request: Request,
 
 @router.get("/{transaction_id}/contract/document", response_class=HTMLResponse, include_in_schema=False)
 def contract_document(transaction_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    tx = _deal(db, transaction_id, current_user)
+    tx = _deal(db, transaction_id, current_user, lock=True)  # one new version even if opened twice at once
     c = dd.current_contract(db, tx)
     if not c:
         db.commit()
@@ -122,10 +122,10 @@ def list_documents(transaction_id: str, current_user: User = Depends(get_current
 
 
 @router.get("/{transaction_id}/receipt/document", response_class=HTMLResponse, include_in_schema=False)
-def receipt_document(transaction_id: str, template: Optional[str] = Query(None),
+def receipt_document(transaction_id: str, template: Optional[str] = Query(None), currency: Optional[str] = Query(None),
                      current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     tx = _deal(db, transaction_id, current_user)
-    page = dd.render_receipt(db, tx, template)
+    page = dd.render_receipt(db, tx, template, currency or dd.display_currency_for(db, current_user))
     db.commit()  # keeps the verification code printed on it
     return HTMLResponse(page)
 
@@ -136,7 +136,7 @@ def email_receipt(transaction_id: str, body: ReceiptEmailBody = Body(default_fac
     tx = _deal(db, transaction_id, current_user)
     if not current_user.email:
         raise HTTPException(status_code=409, detail="Your account has no email address.")
-    page = dd.receipt_email_html(db, tx, body.template)
+    page = dd.receipt_email_html(db, tx, body.template, dd.display_currency_for(db, current_user))
     code = dd.issue_receipt(db, tx)[0].code
     db.commit()
     to = current_user.email

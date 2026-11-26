@@ -418,27 +418,70 @@ def issue_receipt(db: Session, tx: Transaction) -> tuple[IssuedDocument, dict]:
     return _issue(db, tx, "receipt", summary), summary
 
 
-def render_receipt(db: Session, tx: Transaction, template: Optional[str]) -> str:
-    body, css, title = _receipt_parts(db, tx, template)
+def display_currency_for(db: Session, user: Optional[User]) -> Optional[str]:
+    """The currency this user chose to see amounts in (Settings → currency)."""
+    if user is None:
+        return None
+    from app.models.user import UserSettings
+    s = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+    if s is None or not s.default_currency:
+        return None
+    return s.default_currency.upper()
+
+
+def _rate(db: Session, from_cur: str, to_cur: str) -> Optional[float]:
+    from_cur, to_cur = from_cur.upper(), to_cur.upper()
+    if from_cur == to_cur:
+        return 1.0
+    try:
+        from app.routers.transactions import _mid_rate
+        r = float(_mid_rate(db, from_cur, to_cur))
+        return r if r > 0 else None
+    except Exception:  # noqa: BLE001 — no rate: fall back to the deal's own currency
+        return None
+
+
+def render_receipt(db: Session, tx: Transaction, template: Optional[str], display_currency: Optional[str] = None) -> str:
+    body, css, title = _receipt_parts(db, tx, template, display_currency=display_currency)
     return _page(title, body, css)
 
 
-def receipt_email_html(db: Session, tx: Transaction, template: Optional[str]) -> str:
+def receipt_email_html(db: Session, tx: Transaction, template: Optional[str], display_currency: Optional[str] = None) -> str:
     """Same receipt for an email body (no toolbar; styles travel with it; no QR — mail apps drop SVG)."""
-    body, css, _ = _receipt_parts(db, tx, template, email=True)
+    body, css, _ = _receipt_parts(db, tx, template, email=True, display_currency=display_currency)
     return f"<style>{_PAGE_CSS}{css}</style><div class='sheet'>{body}</div>"
 
 
-def _receipt_parts(db: Session, tx: Transaction, template: Optional[str], email: bool = False) -> tuple[str, str, str]:
+def _receipt_parts(db: Session, tx: Transaction, template: Optional[str], email: bool = False,
+                   display_currency: Optional[str] = None) -> tuple[str, str, str]:
     buyer = tx.buyer
     template = template if template in RECEIPT_TEMPLATES else (getattr(buyer, "receipt_template", None) or "classic")
     if template not in RECEIPT_TEMPLATES:
         template = "classic"
     doc, sm = issue_receipt(db, tx)
     cur = tx.currency
+    # Amounts are shown in the reader's chosen currency, with the deal's own figure (the one the
+    # verification page shows) beside it. No rate available → the deal's currency only.
+    disp = (display_currency or cur).upper()
+    rate = _rate(db, cur, disp)
+    if rate is None:
+        disp, rate = cur.upper(), 1.0
+
+    def money(amount, from_cur: Optional[str] = None) -> str:
+        fc = (from_cur or cur).upper()
+        if disp == fc:
+            return _money(fc, amount)
+        r = rate if fc == cur.upper() else _rate(db, fc, disp)
+        if r is None:
+            return _money(fc, amount)
+        return f"{_money(disp, float(amount or 0) * r)}<div class='muted'>{_money(fc, amount)}</div>"
+
+    rate_note = (f"<p class='muted'>Amounts are shown in {_e(disp)} at today's Bondrova rate "
+                 f"(1 {_e(cur)} = {rate:,.2f} {_e(disp)}). The deal is priced and settled in {_e(cur)}; "
+                 f"the {_e(cur)} figure under each amount is the official one.</p>") if disp != cur.upper() else ""
     lines = "".join(
         f"<tr><td>{_datetime(r.created_at)}</td><td>{_KIND[r.type]}</td><td>{_e(r.description or '')}</td>"
-        f"<td class='num'>{_money(r.currency, r.amount)}</td></tr>" for r in receipt_rows(db, tx))
+        f"<td class='num'>{money(r.amount, r.currency)}</td></tr>" for r in receipt_rows(db, tx))
     if not lines:
         lines = "<tr><td colspan='4' class='muted'>No payments on this deal yet.</td></tr>"
     logo = getattr(buyer, "business_logo_url", None)
@@ -447,10 +490,10 @@ def _receipt_parts(db: Session, tx: Transaction, template: Optional[str], email:
                  f"<div style='font-size:20px;font-weight:700'>{_e(issuer)}</div>")
     ms_rows = "".join(
         f"<tr><td>{_e(m['title'])}</td><td>{'Released' if m['released'] else _e((m['status'] or '').replace('_', ' ').capitalize())}</td>"
-        f"<td class='num'>{_money(cur, m['amount'])}</td></tr>" for m in sm["milestones"])
+        f"<td class='num'>{money(m['amount'])}</td></tr>" for m in sm["milestones"])
     held = sm["held_in_escrow"]
     if held > 0:
-        notice = (f"<div class='notice'>{_money(cur, held)} is still held in Bondrova escrow. It has <strong>not</strong> been "
+        notice = (f"<div class='notice'>{money(held)} is still held in Bondrova escrow. It has <strong>not</strong> been "
                   f"paid to the seller yet — it is released only when the buyer approves the work.</div>")
     elif sm["paid_into_escrow"] == 0:
         notice = "<div class='notice'>Nothing has been paid into escrow for this deal yet.</div>"
@@ -468,16 +511,17 @@ def _receipt_parts(db: Session, tx: Transaction, template: Optional[str], email:
 <tr><td>{_e(tx.title)}</td><td>{_e(_name(tx.buyer))}</td><td>{_e(_name(tx.seller))}</td><td>{_e((tx.status or '').replace('_', ' ').capitalize())}</td></tr></table>
 <h2>Milestones</h2>
 <table><tr><th>Milestone</th><th>Status</th><th class="num">Price</th></tr>{ms_rows}
-<tr class="total"><td><strong>Deal total</strong></td><td></td><td class="num"><strong>{_money(cur, sm['deal_total'])}</strong></td></tr></table>
+<tr class="total"><td><strong>Deal total</strong></td><td></td><td class="num"><strong>{money(sm['deal_total'])}</strong></td></tr></table>
 <h2>Payments</h2>
 <table><tr><th>Date</th><th>Type</th><th>Details</th><th class="num">Amount</th></tr>{lines}</table>
 <table style="max-width:380px;margin-left:auto">
-<tr><td>Paid into escrow</td><td class="num">{_money(cur, sm['paid_into_escrow'])}</td></tr>
-<tr><td>Released to seller</td><td class="num">{_money(cur, sm['released_to_seller'])}</td></tr>
-<tr><td>Bondrova fees</td><td class="num">{_money(cur, sm['bondrova_fees'])}</td></tr>
-<tr><td>Refunded to buyer</td><td class="num">{_money(cur, sm['refunded_to_buyer'])}</td></tr>
-<tr class="total"><td><strong>Still held in escrow</strong></td><td class="num"><strong>{_money(cur, held)}</strong></td></tr></table>
+<tr><td>Paid into escrow</td><td class="num">{money(sm['paid_into_escrow'])}</td></tr>
+<tr><td>Released to seller</td><td class="num">{money(sm['released_to_seller'])}</td></tr>
+<tr><td>Bondrova fees</td><td class="num">{money(sm['bondrova_fees'])}</td></tr>
+<tr><td>Refunded to buyer</td><td class="num">{money(sm['refunded_to_buyer'])}</td></tr>
+<tr class="total"><td><strong>Still held in escrow</strong></td><td class="num"><strong>{money(held)}</strong></td></tr></table>
 <p class="muted" style="margin-top:24px">Payments are held and released by Bondrova escrow. Amounts paid into escrow include the buyer's share of the escrow fee; amounts released to the seller are after the escrow fee.</p>
+{rate_note}
 {verify_block(doc, with_qr=not email)}
 """
     return body, _TEMPLATE_CSS[template], f"{title} — {tx.title}"
@@ -529,7 +573,8 @@ def queue_receipt_email(db: Session, tx: Transaction, reason: str) -> None:
     email it to both parties after the commit. A rollback sends nothing."""
     try:
         with db.begin_nested():
-            page = receipt_email_html(db, tx, None)
+            pages = {u.id: receipt_email_html(db, tx, None, display_currency_for(db, u))
+                     for u in (tx.buyer, tx.seller) if u is not None}
             code = issue_receipt(db, tx)[0].code
     except Exception:  # noqa: BLE001 — never let a receipt break a payment
         import logging
@@ -540,7 +585,7 @@ def queue_receipt_email(db: Session, tx: Transaction, reason: str) -> None:
         if u is not None and u.email:
             intro = (f"<p>Hi {_e(u.first_name or 'there')},</p><p>{_e(reason)} Your receipt for <strong>{_e(tx.title)}</strong> "
                      f"is below. You can check it any time at <a href='{_e(verify_url(code))}'>{_e(verify_url(code))}</a>.</p>")
-            pending.append((u.email, f"Receipt — {tx.title} ({code})", intro + page))
+            pending.append((u.email, f"Receipt — {tx.title} ({code})", intro + pages[u.id]))
 
 
 def _register_email_hooks() -> None:
