@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Float, JSON
+from sqlalchemy import Integer, Column, String, Boolean, DateTime, Text, ForeignKey, Float, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -33,6 +33,10 @@ class User(Base):
     bvn_check_id = Column(String(64), nullable=True)
     bvn_failure_reason = Column(String(500), nullable=True)
     bvn_verified_at = Column(DateTime, nullable=True)
+    # Trust Score (300–850, like a credit score) — see app/services/trust_score.py
+    trust_score = Column(Integer, nullable=True)
+    trust_breakdown = Column(JSON, nullable=True)
+    trust_updated_at = Column(DateTime, nullable=True)
     is_agent = Column(Boolean, default=False)
     phone = Column(String(50), nullable=True)
     location = Column(String(200), nullable=True)

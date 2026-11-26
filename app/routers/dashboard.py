@@ -77,7 +77,13 @@ def get_dashboard_stats(
     recent = [{"id": tx.id, "title": tx.title, "status": tx.status, "amount": tx.amount,
                "currency": tx.currency, "updated_at": tx.updated_at} for tx in recent_txns]
 
+    if current_user.trust_score is None:
+        from app.services import trust_score
+        trust_score.recompute(db, current_user, "First calculation")
+        db.commit()
+
     return {
+        "trust_score": current_user.trust_score,
         "total_transactions": total,
         "active_transactions": active,
         "completed_transactions": completed,

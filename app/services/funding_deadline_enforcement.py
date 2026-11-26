@@ -70,6 +70,9 @@ def enforce_funding_deadline_if_due(db: Session, transaction_id: str) -> Dict[st
             refunded += refund_milestone_escrow_to_buyer(m)
         tx.funded_milestones = 0
         tx.status = "cancelled"
+        from app.services import trust_score
+        db.flush()
+        trust_score.recompute_ids(db, [tx.buyer_id], "Deal not funded before the deadline")
         tx.funding_deadline = None
         create_notification(
             db,

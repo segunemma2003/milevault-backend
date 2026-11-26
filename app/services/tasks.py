@@ -683,3 +683,23 @@ def poll_processing_payouts(self) -> dict:
         return _poll(db)
     finally:
         db.close()
+
+
+@celery_app.task(name="app.services.tasks.recompute_trust_scores")
+def recompute_trust_scores() -> dict:
+    """Nightly: refresh every active user's Trust Score (account age, review smoothing, …)."""
+    from app.database import SessionLocal
+    from app.models.user import User
+    from app.services import trust_score
+    db = SessionLocal()
+    n = 0
+    try:
+        for u in db.query(User).filter(User.is_active.is_(True)).all():
+            trust_score.recompute(db, u, "Daily refresh")
+            n += 1
+            if n % 200 == 0:
+                db.commit()
+        db.commit()
+        return {"updated": n}
+    finally:
+        db.close()

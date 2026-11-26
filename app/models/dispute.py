@@ -21,6 +21,8 @@ class Dispute(Base):
     suggested_resolution = Column(Text, nullable=True)
     status = Column(String(20), default="open")  # open | in_review | resolved | closed
     resolution = Column(Text, nullable=True)
+    # Who the admin found at fault when resolving: buyer | seller | none (feeds the Trust Score).
+    ruled_against = Column(String(10), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

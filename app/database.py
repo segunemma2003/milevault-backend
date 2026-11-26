@@ -90,6 +90,7 @@ def create_tables():
     from app.models import content  # noqa
     from app.models import payments  # noqa
     from app.models import support  # noqa
+    from app.models import trust  # noqa
     Base.metadata.create_all(bind=engine)
     # create_all does not add new columns to existing tables — apply idempotent ALTERs
     # against the same DATABASE_URL the app uses (fixes Railway drift vs CLI migrations).

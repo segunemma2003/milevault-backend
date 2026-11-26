@@ -131,3 +131,35 @@ def update_settings(
     db.commit()
     db.refresh(current_user.settings)
     return current_user.settings
+
+
+
+@router.get("/me/trust-score", summary="My Trust Score report")
+def my_trust_score(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models.trust import DealReview, TrustScoreEvent
+    from app.services import trust_score
+    if current_user.trust_score is None:
+        trust_score.recompute(db, current_user, "First calculation")
+        db.commit()
+    history = (db.query(TrustScoreEvent).filter_by(user_id=current_user.id)
+               .order_by(TrustScoreEvent.created_at.desc()).limit(30).all())
+    reviews = (db.query(DealReview).filter_by(reviewee_id=current_user.id)
+               .order_by(DealReview.created_at.desc()).limit(20).all())
+    return {
+        "score": current_user.trust_score, "band": trust_score.band(current_user.trust_score),
+        "min": trust_score.MIN_SCORE, "max": trust_score.MAX_SCORE, "breakdown": current_user.trust_breakdown,
+        "deal_limit_share": trust_score.deal_cap_multiplier(current_user.trust_score),
+        "history": [{"score": e.score, "change": e.change, "reason": e.reason, "at": e.created_at} for e in history],
+        "reviews": [{"rating": r.rating, "comment": r.comment, "as": r.reviewee_role, "at": r.created_at} for r in reviews],
+    }
+
+
+@router.get("/{user_id}/trust", summary="Another user's Trust Score summary")
+def user_trust(user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services import trust_score
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    b = u.trust_breakdown or {}
+    return {"score": u.trust_score, "band": trust_score.band(u.trust_score), "completed_deals": b.get("completed_deals", 0),
+            "rating": u.rating, "rating_count": u.rating_count, "is_kyc_verified": u.is_kyc_verified}

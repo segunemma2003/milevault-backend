@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -143,6 +144,8 @@ def transaction_to_dict(tx: Transaction) -> dict:
             "role": buyer.role,
             "avatar_url": buyer.avatar_url,
             "is_kyc_verified": buyer.is_kyc_verified,
+            "trust_score": buyer.trust_score,
+            "rating": buyer.rating, "rating_count": buyer.rating_count,
             "created_at": buyer.created_at,
         } if buyer else None,
         "seller": {
@@ -154,6 +157,8 @@ def transaction_to_dict(tx: Transaction) -> dict:
             "role": seller.role,
             "avatar_url": seller.avatar_url,
             "is_kyc_verified": seller.is_kyc_verified,
+            "trust_score": seller.trust_score,
+            "rating": seller.rating, "rating_count": seller.rating_count,
             "created_at": seller.created_at,
         } if seller else None,
         "supporting_url": tx.supporting_url,
@@ -1174,10 +1179,6 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
 
     tx.completed_milestones = (tx.completed_milestones or 0) + 1
 
-    # Update seller reputation
-    _update_reputation(db, tx.seller_id)
-    _update_reputation(db, tx.buyer_id)
-
     # Check if all milestones complete
     all_milestones = _ordered_milestones(db, tx.id)
     if all(m.status == "completed" for m in all_milestones):
@@ -1189,6 +1190,11 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         from app.services.agent_fee_service import settle_held_agent_fees_on_transaction_completed
 
         settle_held_agent_fees_on_transaction_completed(db, tx)
+
+    # Trust Scores for both sides (after the deal's status is final, so this deal counts)
+    db.flush()
+    _update_reputation(db, tx.seller_id)
+    _update_reputation(db, tx.buyer_id)
 
     create_notification(
         db, tx.seller_id,
@@ -1243,6 +1249,9 @@ def _update_reputation(db: Session, user_id: str):
     disputed = db.query(Dispute).filter(Dispute.raised_by == user_id).count()
     user.completion_rate = round((completed / total * 100) if total else 0.0, 1)
     user.dispute_rate = round((disputed / total * 100) if total else 0.0, 1)
+    db.flush()
+    from app.services import trust_score
+    trust_score.recompute(db, user, "Milestone completed")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1339,3 +1348,55 @@ def report_invalid_delivery(
         )
     db.commit()
     return {"message": "Report recorded. You can still approve, request a revision, or open a dispute."}
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  REVIEWS — each party rates the other once a deal is completed
+# ══════════════════════════════════════════════════════════════════
+
+class ReviewIn(BaseModel):
+    rating: int
+    comment: Optional[str] = None
+
+
+@router.post("/{transaction_id}/review", status_code=201)
+def leave_review(transaction_id: str, body: ReviewIn, current_user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    from app.models.trust import DealReview
+    from app.services import trust_score
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if current_user.id not in (tx.buyer_id, tx.seller_id):
+        raise HTTPException(status_code=403, detail="Only the buyer or seller can review this deal")
+    if tx.status != "completed":
+        raise HTTPException(status_code=409, detail={"error": "NOT_COMPLETED", "message": "You can rate the other party once the deal is completed."})
+    if not 1 <= int(body.rating) <= 5:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_RATING", "message": "Rating must be 1 to 5 stars."})
+    if db.query(DealReview).filter_by(transaction_id=tx.id, reviewer_id=current_user.id).first():
+        raise HTTPException(status_code=409, detail={"error": "ALREADY_REVIEWED", "message": "You've already rated this deal."})
+    reviewee_id = tx.seller_id if current_user.id == tx.buyer_id else tx.buyer_id
+    role = "seller" if current_user.id == tx.buyer_id else "buyer"
+    db.add(DealReview(transaction_id=tx.id, reviewer_id=current_user.id, reviewee_id=reviewee_id, reviewee_role=role,
+                      rating=int(body.rating), comment=(body.comment or "").strip()[:1000] or None))
+    db.flush()
+    reviewee = db.query(User).filter(User.id == reviewee_id).first()
+    trust_score.recompute(db, reviewee, f"New {body.rating}-star review")
+    create_notification(db, reviewee_id, "You got a new review",
+                        f"{current_user.first_name} rated you {body.rating}/5 for '{tx.title}'.", "transaction",
+                        related_item_id=tx.id, related_item_type="transaction")
+    db.commit()
+    return {"message": "Thanks — your rating has been recorded."}
+
+
+@router.get("/{transaction_id}/reviews")
+def deal_reviews(transaction_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models.trust import DealReview
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx or current_user.id not in (tx.buyer_id, tx.seller_id):
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    rows = db.query(DealReview).filter_by(transaction_id=tx.id).all()
+    return {"can_review": tx.status == "completed" and not any(r.reviewer_id == current_user.id for r in rows),
+            "reviews": [{"reviewer_id": r.reviewer_id, "reviewee_role": r.reviewee_role, "rating": r.rating,
+                         "comment": r.comment, "created_at": r.created_at} for r in rows]}

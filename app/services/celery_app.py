@@ -32,6 +32,10 @@ celery_app.conf.update(
         "app.services.tasks.process_refund": {"queue": "payments"},
     },
     beat_schedule={
+        "recompute-trust-scores-daily": {
+            "task": "app.services.tasks.recompute_trust_scores",
+            "schedule": crontab(hour=2, minute=30),
+        },
         "expire-stale-invitations-daily": {
             "task": "app.services.tasks.expire_stale_invitations",
             "schedule": crontab(hour=3, minute=15),

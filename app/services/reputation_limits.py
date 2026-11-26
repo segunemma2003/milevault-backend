@@ -20,18 +20,10 @@ def max_new_transaction_amount_for_user(db: Session, user: User) -> float:
     ps = _settings(db)
     base = float(ps.max_transaction_amount) if ps and ps.max_transaction_amount else 1_000_000.0
     base = max(base, 100.0)
-    r = float(user.rating or 0)
-    dr = float(user.dispute_rate or 0)
-    if r >= 4.5 and dr < 8.0:
-        mult = 1.0
-    elif r < 3.0 or dr > 35.0:
-        mult = 0.12
-    elif dr > 18.0:
-        mult = 0.45
-    elif r < 4.0:
-        mult = 0.65
-    else:
-        mult = 1.0
+    # Trust Score (300–850) sets the share of the cap: Very good+ → 100%, Good → 80%, Fair → 50%, else 25%.
+    from app.services import trust_score
+    score = user.trust_score if user.trust_score is not None else trust_score.compute(db, user)[0]
+    mult = trust_score.deal_cap_multiplier(score)
     return round(base * mult, 2)
 
 

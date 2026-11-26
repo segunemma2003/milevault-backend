@@ -63,6 +63,9 @@ def _recompute(db: Session, user: User) -> str:
         user.is_kyc_verified = True
         _notify(db, user.id, "Identity Verified",
                 "Your KYC verification is complete. You now have full access, including withdrawals.")
+        db.flush()
+        from app.services import trust_score
+        trust_score.recompute(db, user, "Identity verified")
     return _overall(docs)
 
 

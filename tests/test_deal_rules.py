@@ -278,3 +278,53 @@ def test_dashboard_stats_show_escrow_and_incoming(db):
     assert (usd["amount"], usd["escrow"]) == (110.0, 40.0) and sb["active_transactions"] == 1
     ss = get_dashboard_stats(s, db)
     assert ss["incoming_escrow"] == [{"currency": "USD", "amount": 40.0}] and ss["active_transactions"] == 1
+
+
+# ─── Trust Score ─────────────────────────────────────────────────────────────
+
+def test_trust_score_rises_for_both_sides_and_reacts_to_reviews_and_disputes(db):
+    from app.services import trust_score
+    from app.models.dispute import Dispute
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    trust_score.recompute(db, b); trust_score.recompute(db, s); db.commit()
+    start_b, start_s = b.trust_score, s.trust_score
+    assert 480 <= start_b <= 600 and trust_score.band(start_b) in ("Building", "Fair")
+
+    for i in range(3):   # three completed deals
+        tx, (m,) = deal(db, b, s, 50)
+        deposit(db, b, "USD", 50)
+        T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+        T._release_milestone_escrow(db, tx, db.get(Milestone, m.id)); db.commit()
+    db.refresh(b); db.refresh(s)
+    assert b.trust_score > start_b and s.trust_score > start_s           # both ends go up
+    assert b.trust_breakdown["completed_deals"] == 3
+
+    before = s.trust_score
+    T.leave_review(tx.id, T.ReviewIn(rating=5, comment="Great work"), b, db)
+    db.refresh(s)
+    assert s.trust_score >= before and s.rating == 5.0 and s.rating_count == 1
+    with pytest.raises(HTTPException):
+        T.leave_review(tx.id, T.ReviewIn(rating=4), b, db)               # one review per party per deal
+
+    before = s.trust_score
+    db.add(Dispute(transaction_id=tx.id, raised_by=b.id, title="Late", description="x" * 30, reason="other",
+                   status="resolved", ruled_against="seller"))
+    db.commit()
+    trust_score.recompute(db, s, "Dispute resolved"); db.commit()
+    assert s.trust_score < before                                          # a lost dispute hurts
+
+
+def test_review_only_after_completion_and_by_parties(db):
+    b, s, x = mk(db, "buyer@x.com"), mk(db, "seller@x.com"), mk(db, "x@x.com")
+    tx, _ = deal(db, b, s, 20)
+    with pytest.raises(HTTPException) as e:
+        T.leave_review(tx.id, T.ReviewIn(rating=5), b, db)
+    assert e.value.status_code == 409
+    with pytest.raises(HTTPException) as e:
+        T.leave_review(tx.id, T.ReviewIn(rating=5), x, db)
+    assert e.value.status_code == 403
+
+
+def test_deal_cap_follows_trust_score():
+    from app.services.trust_score import deal_cap_multiplier
+    assert [deal_cap_multiplier(s) for s in (500, 600, 700, 760)] == [0.25, 0.5, 0.8, 1.0]

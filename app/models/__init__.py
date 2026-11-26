@@ -15,3 +15,4 @@ __all__ = [
     "KycDocument",
     "Notification",
 ]
+from app.models import trust  # noqa: F401,E402 — Trust Score tables

@@ -1138,9 +1138,12 @@ def admin_update_dispute(
         None,
         description="On resolve: refund_buyer | release_agent | omit for default (pay only if agent completed verification)",
     ),
+    ruled_against: Optional[str] = Body(None, description="buyer | seller | none — who was at fault (affects Trust Scores)"),
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin("support")),
 ):
+    if ruled_against is not None and ruled_against not in ("buyer", "seller", "none"):
+        raise HTTPException(status_code=422, detail={"error": "INVALID_RULING", "message": "ruled_against must be buyer, seller or none."})
     valid = {"open", "in_review", "resolved", "closed"}
     if new_status not in valid:
         raise HTTPException(
@@ -1160,6 +1163,8 @@ def admin_update_dispute(
     dispute.status = new_status
     if resolution:
         dispute.resolution = resolution
+    if ruled_against is not None:
+        dispute.ruled_against = ruled_against
 
     fee_out = None
     tx = dispute.transaction
@@ -1176,6 +1181,9 @@ def admin_update_dispute(
             from app.services.agent_fee_service import apply_agent_fee_policy_after_dispute
 
             fee_out = apply_agent_fee_policy_after_dispute(db, tx, agent_fee_action)
+        db.flush()
+        from app.services import trust_score
+        trust_score.recompute_ids(db, [tx.buyer_id, tx.seller_id], "Dispute resolved")
 
     db.commit()
     return {
