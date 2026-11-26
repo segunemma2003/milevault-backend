@@ -22,6 +22,7 @@ from app.models.user import User
 from app.models.wallet import WalletBalance, WalletTransaction, LedgerEntry
 from app.dependencies import get_current_user
 from app.services.notification_service import create_notification
+from app.services import trust_score
 from app.services import ledger
 from app.services.ledger import InsufficientFunds
 from app.config import settings
@@ -31,7 +32,8 @@ logger = logging.getLogger("milevault.transactions")
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
-def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: str, tx_id: str) -> None:
+def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: str, tx_id: str,
+                                   inviter_trust: str = "") -> None:
     """Email an unregistered counterparty inviting them to register and accept the transaction."""
     from app.services.email_template import button, render_email, sender as email_sender
     register_url = f"{settings.FRONTEND_URL}/register"
@@ -40,7 +42,9 @@ def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: s
         f"<p>Hi there,</p>"
         f"<p><strong>{inviter_name}</strong> has invited you to participate in an escrow transaction: "
         f"<strong>{tx_title}</strong>.</p>"
-        f"<p>Bondrova is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
+        + (f"<p style='background:#f6f6f6;border-radius:8px;padding:10px 12px'><strong>About {inviter_name}:</strong> "
+           f"{inviter_trust}</p>" if inviter_trust else "")
+        + f"<p>Bondrova is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
         f"<p>To accept this invitation, create your free account:</p>"
         f"<p>{button(register_url, 'Create Account &amp; Accept')}</p>"
         f"<p>Once registered with this email address, the transaction will automatically appear in your dashboard.</p>"
@@ -313,7 +317,8 @@ def create_transaction(
             db,
             invitee_id,
             "New transaction invitation",
-            f"{current_user.first_name} {current_user.last_name} invited you to a transaction: {tx.title}",
+            f"{current_user.first_name} {current_user.last_name} invited you to a transaction: {tx.title}. "
+            f"About them: {trust_score.summary_line(db, current_user)}.",
             "transaction",
             related_item_id=tx.id,
             related_item_type="transaction",
@@ -324,7 +329,7 @@ def create_transaction(
         inviter_name = f"{current_user.first_name} {current_user.last_name}".strip()
         threading.Thread(
             target=_send_transaction_invite_email,
-            args=(raw_email, inviter_name, tx.title, tx.id),
+            args=(raw_email, inviter_name, tx.title, tx.id, trust_score.summary_line(db, current_user)),
             daemon=True,
         ).start()
 
@@ -664,7 +669,7 @@ def remind_counterparty(
         import threading
         threading.Thread(
             target=_send_transaction_invite_email,
-            args=(tx.counterparty_email, inviter_name, tx.title, tx.id),
+            args=(tx.counterparty_email, inviter_name, tx.title, tx.id, trust_score.summary_line(db, current_user)),
             daemon=True,
         ).start()
     else:

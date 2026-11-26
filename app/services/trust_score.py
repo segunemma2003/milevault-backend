@@ -158,3 +158,34 @@ def deal_cap_multiplier(score: int | None) -> float:
     if s >= 580:
         return 0.5
     return 0.25
+
+
+def summary_line(db: Session, user) -> str:
+    """One line about a user for invitations: score, stars, deals, verification — or 'new member'."""
+    if user.trust_score is None:
+        recompute(db, user, "First calculation")
+    b = user.trust_breakdown or {}
+    deals = b.get("completed_deals", 0)
+    parts = [f"Trust Score {user.trust_score} ({band(user.trust_score)})"]
+    if user.rating_count:
+        parts.append(f"{float(user.rating or 0):.1f}★ from {int(user.rating_count)} review{'s' if user.rating_count != 1 else ''}")
+    parts.append(f"{deals} completed deal{'s' if deals != 1 else ''}" if deals else "new to Bondrova — no completed deals yet")
+    parts.append("identity verified" if user.is_kyc_verified else "identity not yet verified")
+    return " · ".join(parts)
+
+
+def public_profile(db: Session, user) -> dict:
+    """What another user may see about this person before dealing with them."""
+    if user.trust_score is None:
+        recompute(db, user, "First calculation")
+    b = user.trust_breakdown or {}
+    last = (user.last_name or "").strip()
+    return {
+        "registered": True,
+        "name": f"{(user.first_name or '').strip()} {last[:1] + '.' if last else ''}".strip(),
+        "trust_score": user.trust_score, "band": band(user.trust_score),
+        "rating": float(user.rating or 0), "rating_count": int(user.rating_count or 0),
+        "completed_deals": b.get("completed_deals", 0), "disputes_lost": b.get("disputes_lost", 0),
+        "is_kyc_verified": bool(user.is_kyc_verified), "bvn_verified": user.bvn_status == "verified",
+        "member_since": user.created_at,
+    }

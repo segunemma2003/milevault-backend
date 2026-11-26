@@ -328,3 +328,17 @@ def test_review_only_after_completion_and_by_parties(db):
 def test_deal_cap_follows_trust_score():
     from app.services.trust_score import deal_cap_multiplier
     assert [deal_cap_multiplier(s) for s in (500, 600, 700, 760)] == [0.25, 0.5, 0.8, 1.0]
+
+
+def test_counterparty_lookup_and_invite_trust_line(db):
+    from app.routers import users
+    from app.services import trust_score
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    s.last_name = "Okafor"; db.commit()
+    out = users.lookup_counterparty("SELLER@x.com", b, db)
+    assert out["registered"] and out["name"] == "S O." and 300 <= out["trust_score"] <= 850 and "email" not in out
+    assert users.lookup_counterparty("nobody@x.com", b, db) == {"registered": False}
+    with pytest.raises(HTTPException):
+        users.lookup_counterparty("buyer@x.com", b, db)
+    line = trust_score.summary_line(db, b)
+    assert line.startswith("Trust Score ") and "new to Bondrova" in line

@@ -1,6 +1,7 @@
 import os
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.user import UserOut, UpdateProfileRequest, UserSettingsOut, UpdateSettingsRequest
@@ -132,6 +133,24 @@ def update_settings(
     db.refresh(current_user.settings)
     return current_user.settings
 
+
+
+@router.get("/lookup", summary="Who is this email? (for starting a deal)")
+def lookup_counterparty(email: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lets you see who you'd be dealing with before creating a deal: their Trust Score, rating, completed
+    deals and verification — or that they're not on Bondrova yet (they'll get an invite)."""
+    from app.services import trust_score
+    em = (email or "").strip().lower()
+    if "@" not in em or "." not in em.split("@")[-1]:
+        raise HTTPException(status_code=422, detail="Enter a valid email address.")
+    if em == (current_user.email or "").lower():
+        raise HTTPException(status_code=422, detail="That's your own email.")
+    u = db.query(User).filter(func.lower(User.email) == em, User.is_active.is_(True)).first()
+    if not u:
+        return {"registered": False}
+    out = trust_score.public_profile(db, u)
+    db.commit()
+    return out
 
 
 @router.get("/me/trust-score", summary="My Trust Score report")
