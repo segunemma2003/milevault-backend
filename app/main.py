@@ -141,7 +141,14 @@ app = FastAPI(
     redoc_url="/redoc" if not settings.is_production else None,
 )
 
-# ─── CORS (must be first) ─────────────────────────────────────────────────────
+# ─── Middleware ───────────────────────────────────────────────────────────────
+# Starlette runs the LAST added middleware FIRST (outermost). Order, outside → in:
+#   CORS → security (CSRF/headers) → rate limit → idempotency → app
+# CORS must be outermost so every response — including 403/409/429 and idempotent replays
+# produced by the inner layers — carries the headers the browser needs to read it.
+app.add_middleware(IdempotencyMiddleware)
+app.add_middleware(RateLimiterMiddleware)
+app.add_middleware(SecurityMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -150,11 +157,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Idempotency-Replayed", "X-RateLimit-Remaining", "Retry-After"],
 )
-
-# ─── Custom middleware stack ──────────────────────────────────────────────────
-app.add_middleware(SecurityMiddleware)
-app.add_middleware(RateLimiterMiddleware)
-app.add_middleware(IdempotencyMiddleware)
 
 # ─── Static file serving (dev only) ──────────────────────────────────────────
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

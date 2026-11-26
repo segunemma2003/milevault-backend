@@ -32,6 +32,10 @@ celery_app.conf.update(
         "app.services.tasks.process_refund": {"queue": "payments"},
     },
     beat_schedule={
+        "purge-idempotency-records-daily": {
+            "task": "app.services.tasks.purge_idempotency_records",
+            "schedule": crontab(hour=4, minute=45),
+        },
         "recompute-trust-scores-daily": {
             "task": "app.services.tasks.recompute_trust_scores",
             "schedule": crontab(hour=2, minute=30),

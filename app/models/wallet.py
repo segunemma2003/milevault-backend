@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
+from sqlalchemy import Integer, Column, String, Float, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -80,3 +80,25 @@ class LedgerEntry(Base):
     reference_id = Column(String, nullable=True)         # milestone_id / transaction_id / withdrawal_id
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+
+class IdempotencyRecord(Base):
+    """
+    One row per (user, Idempotency-Key): the first request claims it (status=processing), and its
+    response is stored when it finishes. A repeat with the same key gets the stored response back
+    instead of running again; a repeat while the first is still running is refused. The unique
+    constraint makes the claim atomic, so two simultaneous clicks can't both get through.
+    """
+    __tablename__ = "idempotency_records"
+    __table_args__ = (UniqueConstraint("user_key", "idem_key", name="uq_idempotency_user_key"),)
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_key = Column(String(80), nullable=False)       # user id (or "anon")
+    idem_key = Column(String(128), nullable=False)
+    method_path = Column(String(300), nullable=False)
+    body_hash = Column(String(64), nullable=False)
+    status = Column(String(12), nullable=False, default="processing")   # processing | done
+    response_status = Column(Integer, nullable=True)
+    response_body = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

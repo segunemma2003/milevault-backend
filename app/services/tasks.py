@@ -703,3 +703,17 @@ def recompute_trust_scores() -> dict:
         return {"updated": n}
     finally:
         db.close()
+
+
+@celery_app.task(name="app.services.tasks.purge_idempotency_records")
+def purge_idempotency_records() -> dict:
+    from datetime import datetime, timedelta
+    from app.database import SessionLocal
+    from app.models.wallet import IdempotencyRecord
+    db = SessionLocal()
+    try:
+        n = db.query(IdempotencyRecord).filter(IdempotencyRecord.created_at < datetime.utcnow() - timedelta(hours=48)).delete()
+        db.commit()
+        return {"deleted": n}
+    finally:
+        db.close()
