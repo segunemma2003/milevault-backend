@@ -38,16 +38,16 @@ def _send_transaction_invite_email(to_email: str, inviter_name: str, tx_title: s
     from app.services.email_template import button, render_email, sender as email_sender
     register_url = f"{settings.FRONTEND_URL}/register"
     body_html = (
-        f"<h2>You've been invited to a transaction on Bondrova</h2>"
+        f"<h2>You've been invited to a deal on Bondrova</h2>"
         f"<p>Hi there,</p>"
-        f"<p><strong>{inviter_name}</strong> has invited you to participate in an escrow transaction: "
+        f"<p><strong>{inviter_name}</strong> has invited you to an escrow deal: "
         f"<strong>{tx_title}</strong>.</p>"
         + (f"<p style='background:#f6f6f6;border-radius:8px;padding:10px 12px'><strong>About {inviter_name}:</strong> "
            f"{inviter_trust}</p>" if inviter_trust else "")
         + f"<p>Bondrova is a secure escrow platform that protects both buyers and sellers during online transactions.</p>"
         f"<p>To accept this invitation, create your free account:</p>"
         f"<p>{button(register_url, 'Create Account &amp; Accept')}</p>"
-        f"<p>Once registered with this email address, the transaction will automatically appear in your dashboard.</p>"
+        f"<p>Once registered with this email address, the deal will automatically appear in your dashboard.</p>"
         f"<p>If you did not expect this invitation, you can safely ignore this email.</p>"
     )
     if not settings.RESEND_API_KEY:
@@ -212,7 +212,7 @@ def create_transaction(
         counterparty = db.query(User).filter(func.lower(User.email) == email_norm).first()
 
     if counterparty and counterparty.id == current_user.id:
-        raise HTTPException(status_code=422, detail={"message": "You cannot create a transaction with yourself as the counterparty."})
+        raise HTTPException(status_code=422, detail={"message": "You cannot create a deal with yourself as the other party."})
 
     if payload.initiated_as == "seller":
         if not counterparty:
@@ -327,7 +327,7 @@ def create_transaction(
             db,
             invitee_id,
             "New transaction invitation",
-            f"{current_user.first_name} {current_user.last_name} invited you to a transaction: {tx.title}. "
+            f"{current_user.first_name} {current_user.last_name} invited you to a deal: {tx.title}. "
             f"About them: {trust_score.summary_line(db, current_user)}.",
             "transaction",
             related_item_id=tx.id,
@@ -373,7 +373,7 @@ def get_transaction(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     if tx.status in ("funding_in_progress", "partially_funded", "active", "approved"):
@@ -395,7 +395,7 @@ def update_transaction(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -420,7 +420,7 @@ def cancel_transaction(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     initiator = getattr(tx, "initiated_by_user_id", None)
     if initiator:
         if current_user.id != initiator:
@@ -442,7 +442,7 @@ def cancel_transaction(
     refund_held_agent_fees_for_transaction(db, tx)
     tx.status = "cancelled"
     db.commit()
-    return {"message": "Transaction cancelled"}
+    return {"message": "Deal cancelled"}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -460,7 +460,7 @@ class CancelResponseBody(BaseModel):
 def _locked_deal(db: Session, transaction_id: str) -> Transaction:
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     return tx
 
 
@@ -579,7 +579,7 @@ def get_milestones(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -595,7 +595,7 @@ def create_milestone(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only buyer can add milestones")
 
@@ -628,7 +628,7 @@ def update_milestone(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -663,9 +663,9 @@ def accept_transaction(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.status not in ("pending_acceptance", "pending_approval"):
-        raise HTTPException(status_code=409, detail=f"Cannot accept transaction in status '{tx.status}'")
+        raise HTTPException(status_code=409, detail=f"This deal can't be accepted while it is {tx.status.replace('_', ' ')}.")
 
     initiator = getattr(tx, "initiated_by_user_id", None)
     if initiator:
@@ -725,7 +725,7 @@ def decline_transaction(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     from app.services.deal_cancellation import PRE_START_STATUSES
     if tx.status not in PRE_START_STATUSES:
         # Declining is only for an invitation. A started deal is cancelled only by agreement
@@ -750,14 +750,14 @@ def decline_transaction(
     create_notification(
         db,
         notify_id,
-        "Transaction declined",
+        "Deal declined",
         f"{current_user.first_name} declined '{tx.title}'." + (f" Reason: {reason}" if reason else ""),
         "transaction",
         related_item_id=tx.id,
         related_item_type="transaction",
     )
     db.commit()
-    return {"message": "Transaction declined."}
+    return {"message": "Deal declined."}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -777,7 +777,7 @@ def remind_counterparty(
     """
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
 
     initiator_id = getattr(tx, "initiated_by_user_id", None) or tx.buyer_id
     if str(current_user.id) != str(initiator_id):
@@ -807,7 +807,7 @@ def remind_counterparty(
             db,
             notify_id,
             "Transaction reminder",
-            f"{inviter_name} is reminding you to respond to the transaction: {tx.title}",
+            f"{inviter_name} is reminding you to respond to the deal: {tx.title}",
             "transaction",
             related_item_id=tx.id,
             related_item_type="transaction",
@@ -971,11 +971,11 @@ def _buyer_fund_guard(db: Session, transaction_id: str, user: User) -> Transacti
         raise HTTPException(status_code=403, detail={"error": "WALLET_FROZEN", "message": "Your wallet has been frozen. Contact support."})
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can fund milestones")
     if tx.status not in FUNDABLE_STATUSES:
-        raise HTTPException(status_code=409, detail=f"Cannot fund milestones in transaction status '{tx.status}'")
+        raise HTTPException(status_code=409, detail=f"Milestones can't be funded while the deal is {tx.status.replace('_', ' ')}.")
     return tx
 
 
@@ -1077,7 +1077,7 @@ def request_start(
     """Buyer nudges the seller to start a milestone that is fully paid but not started yet."""
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can ask the seller to start")
     ready = [m for m in _ordered_milestones(db, tx.id) if m.is_funded and m.status == "funded"]
@@ -1110,7 +1110,7 @@ def start_milestone(
     """Seller explicitly marks a funded milestone as in progress."""
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the seller can start work on a milestone")
 
@@ -1154,7 +1154,7 @@ def submit_delivery(
     """Seller submits structured delivery proof. Milestone moves to under_review until buyer acts or auto-release."""
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the seller can submit delivery")
 
@@ -1235,7 +1235,7 @@ def approve_milestone(
 
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can approve milestones")
 
@@ -1433,7 +1433,7 @@ def request_revision(
     """Buyer requests a revision. Milestone goes back to seller without releasing funds."""
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can request revisions")
 
@@ -1480,7 +1480,7 @@ def report_invalid_delivery(
     note = payload.note
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can report delivery issues")
 
@@ -1541,7 +1541,7 @@ def leave_review(transaction_id: str, body: ReviewIn, current_user: User = Depen
     from app.services import trust_score
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if current_user.id not in (tx.buyer_id, tx.seller_id):
         raise HTTPException(status_code=403, detail="Only the buyer or seller can review this deal")
     if not 1 <= int(body.rating) <= 5:
@@ -1582,7 +1582,7 @@ def deal_reviews(transaction_id: str, current_user: User = Depends(get_current_u
     from app.models.trust import DealReview
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx or current_user.id not in (tx.buyer_id, tx.seller_id):
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     rows = db.query(DealReview).filter_by(transaction_id=tx.id).order_by(DealReview.created_at).all()
     targets = _review_targets(db, tx, current_user.id)
     return {"can_review": targets["deal"], "can_review_milestones": targets["milestones"],

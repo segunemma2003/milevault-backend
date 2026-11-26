@@ -41,7 +41,7 @@ def create_dispute(
 ):
     tx = db.query(Transaction).filter(Transaction.id == payload.transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -113,7 +113,7 @@ def create_dispute(
             db,
             other_user_id,
             "Dispute Filed",
-            f"A dispute has been filed for transaction '{tx.title}'.",
+            f"A dispute has been filed for the deal '{tx.title}'.",
             "dispute",
             related_item_id=dispute.id,
             related_item_type="dispute",

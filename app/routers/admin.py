@@ -664,7 +664,7 @@ def create_refund(
     _notify(
         db, refund_to_user_id,
         "Refund Initiated",
-        f"A refund of {currency.upper()} {amount:,.2f} has been initiated for your transaction. Funds will appear in your wallet shortly.",
+        f"A refund of {currency.upper()} {amount:,.2f} has been initiated for your deal. Funds will appear in your wallet shortly.",
     )
     db.commit()
 
@@ -946,8 +946,8 @@ def force_status(
 
     for uid in [str(tx.buyer_id), str(tx.seller_id) if tx.seller_id else None]:
         if uid:
-            _notify(db, uid, "Transaction Status Changed",
-                    f"Admin has updated your transaction '{tx.title}' from '{old_status}' to '{new_status}'. Reason: {reason}")
+            _notify(db, uid, "Deal Status Changed",
+                    f"Bondrova has updated your deal '{tx.title}' from '{old_status}' to '{new_status}'. Reason: {reason}")
     db.commit()
     return {"message": f"Transaction status changed from '{old_status}' to '{new_status}'."}
 

@@ -241,7 +241,7 @@ async def transaction_ws(
         from app.models.agent import AgentRequest
         tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
         if not tx:
-            await websocket.close(code=4004, reason="Transaction not found")
+            await websocket.close(code=4004, reason="Deal not found")
             return
 
         is_party = str(tx.buyer_id) == str(user.id) or str(tx.seller_id) == str(user.id)

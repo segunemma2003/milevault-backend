@@ -95,7 +95,7 @@ def get_chat_messages(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -114,7 +114,7 @@ def send_chat_message(
 ):
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 

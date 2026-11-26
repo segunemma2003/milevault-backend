@@ -421,7 +421,7 @@ def request_agent(
 ):
     tx = db.query(Transaction).filter(Transaction.id == payload.transaction_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail={"error": "TRANSACTION_NOT_FOUND", "message": "Transaction not found."})
+        raise HTTPException(status_code=404, detail={"error": "TRANSACTION_NOT_FOUND", "message": "Deal not found."})
     if str(tx.buyer_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail={"error": "NOT_YOUR_TRANSACTION", "message": "Only the buyer can request an agent."})
 
@@ -465,7 +465,7 @@ def request_agent(
     db.add(req)
 
     _notify(db, str(agent.user_id), "New Agent Request",
-            f"You have a new verification request for transaction '{tx.title}'.")
+            f"You have a new verification request for the deal '{tx.title}'.")
     _notify(db, str(current_user.id), "Agent Request Sent",
             f"Your request has been sent. Agent fee: {fee_currency or ''} {fee_charged or 'N/A'}.")
 
@@ -645,7 +645,7 @@ def agent_view_transaction(
         AgentRequest.status == AgentRequestStatus.active,
     ).first()
     if not req:
-        raise HTTPException(status_code=403, detail={"error": "ACCESS_DENIED", "message": "Not assigned to this transaction."})
+        raise HTTPException(status_code=403, detail={"error": "ACCESS_DENIED", "message": "You are not assigned to this deal."})
 
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     seller = tx.seller
@@ -776,7 +776,7 @@ def post_agent_request_message(
             notify_ids.add(str(ag.user_id))
     notify_ids.discard(str(current_user.id))
     for uid in notify_ids:
-        _notify(db, uid, "Agent thread update", f"New {role} message on '{tx.title if tx else 'transaction'}'.", "agent")
+        _notify(db, uid, "Agent thread update", f"New {role} message on '{tx.title if tx else 'the deal'}'.", "agent")
     db.commit()
     db.refresh(msg)
     return {

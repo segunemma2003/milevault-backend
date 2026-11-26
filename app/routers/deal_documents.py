@@ -37,7 +37,7 @@ def _deal(db: Session, transaction_id: str, user: User, lock: bool = False) -> T
     q = db.query(Transaction).filter(Transaction.id == transaction_id)
     tx = (q.with_for_update() if lock else q).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        raise HTTPException(status_code=404, detail="Deal not found")
     if user.id not in (tx.buyer_id, tx.seller_id) and not getattr(user, "is_admin", False):
         raise HTTPException(status_code=403, detail="Access denied")
     return tx
