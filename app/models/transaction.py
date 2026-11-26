@@ -89,6 +89,12 @@ class Milestone(Base):
     delivery_version_notes = Column(Text, nullable=True)
     invalid_delivery_reported = Column(Boolean, default=False)
     invalid_delivery_report_note = Column(Text, nullable=True)
+    # Handover code (optional OTP): the buyer gets a code and gives it to the seller only once the
+    # goods are in hand; the seller entering it confirms receipt and releases the milestone.
+    handover_code_hash = Column(String(128), nullable=True)
+    handover_code_expires_at = Column(DateTime, nullable=True)
+    handover_attempts = Column(Integer, default=0)
+    handover_confirmed_at = Column(DateTime, nullable=True)
     milestone_action_logs = Column(JSON, default=list)   # append-only audit: {at, user_id, action, detail}
     expectations = Column(Text, nullable=True)
     feedback = Column(Text, nullable=True)
@@ -121,3 +127,26 @@ class CancellationRequest(Base):
     responded_at = Column(DateTime, nullable=True)
 
     transaction = relationship("Transaction", back_populates="cancellation_requests")
+
+
+class DealContract(Base):
+    """
+    The deal's agreement, generated from its terms. Each change to the terms makes a new version
+    (the old one is superseded and signatures start over). Both parties sign by typing their name;
+    the signature is bound to the exact terms via `terms_hash`.
+    """
+    __tablename__ = "deal_contracts"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    transaction_id = Column(String, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    terms = Column(JSON, nullable=False)
+    terms_hash = Column(String(64), nullable=False)
+    status = Column(String(20), nullable=False, default="awaiting_signatures")  # awaiting_signatures | signed | superseded
+    buyer_signed_name = Column(String(200), nullable=True)
+    buyer_signed_at = Column(DateTime, nullable=True)
+    buyer_signed_ip = Column(String(64), nullable=True)
+    seller_signed_name = Column(String(200), nullable=True)
+    seller_signed_at = Column(DateTime, nullable=True)
+    seller_signed_ip = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

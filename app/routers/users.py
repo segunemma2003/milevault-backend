@@ -1,6 +1,8 @@
 import os
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -173,6 +175,71 @@ def my_trust_score(current_user: User = Depends(get_current_user), db: Session =
         "history": [{"score": e.score, "change": e.change, "reason": e.reason, "at": e.created_at} for e in history],
         "reviews": [{"rating": r.rating, "comment": r.comment, "as": r.reviewee_role, "at": r.created_at} for r in reviews],
     }
+
+
+class BrandingBody(BaseModel):
+    business_name: Optional[str] = None
+    receipt_template: Optional[str] = None
+
+
+@router.put("/me/branding", response_model=UserOut, summary="Business name and receipt template for deal receipts")
+def update_branding(body: BrandingBody, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.deal_documents import RECEIPT_TEMPLATES
+    if body.receipt_template is not None:
+        if body.receipt_template not in RECEIPT_TEMPLATES:
+            raise HTTPException(status_code=422, detail={"error": "INVALID_TEMPLATE",
+                                "message": f"Template must be one of: {', '.join(RECEIPT_TEMPLATES)}."})
+        current_user.receipt_template = body.receipt_template
+    if body.business_name is not None:
+        current_user.business_name = body.business_name.strip()[:200] or None
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.post("/me/logo", response_model=UserOut, summary="Upload the business logo shown on deal receipts")
+async def upload_logo(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.s3_service import owns_key, put_bytes, _build_s3_key
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    kind, data = await _read_upload_request(request)
+    if kind == "key":
+        s3_key = str(data.get("s3_key") or "")
+        if not owns_key(s3_key, "avatars", str(current_user.id)):
+            raise HTTPException(status_code=400, detail="Invalid logo upload key")
+    else:
+        file = data.get("file")
+        if file is None or not hasattr(file, "read"):
+            raise HTTPException(status_code=400, detail="No file provided")
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="The logo must be a PNG, JPG or WEBP image")
+        content = await file.read()
+        if len(content) > 2 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Logo too large (max 2MB)")
+        s3_key = _build_s3_key("avatars", file.filename or "logo.png", str(current_user.id))
+        put_bytes(s3_key, content, file.content_type)
+    base = _public_api_base(request)
+    current_user.business_logo_url = (f"{base}/api/v1/uploads/avatar/{s3_key}" if settings.s3_enabled
+                                      else f"{base}/api/v1/uploads/local/{s3_key}")
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.delete("/me/logo", response_model=UserOut, summary="Remove the receipt logo")
+def delete_logo(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    current_user.business_logo_url = None
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.get("/{user_id}/profile", summary="Public transaction reputation (shareable, no sign-in needed)")
+def public_profile(user_id: str, db: Session = Depends(get_db)):
+    from app.services.reputation import public_profile as build
+    u = db.get(User, user_id)
+    if not u or not u.is_active or getattr(u, "is_admin", False):
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return build(db, u)
 
 
 @router.get("/{user_id}/trust", summary="Another user's Trust Score summary")

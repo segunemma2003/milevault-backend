@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -24,7 +25,7 @@ from app.routers import (
     auth, users, transactions, wallet,
     disputes, messages, notifications, kyc, dashboard,
 )
-from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments, admin_team
+from app.routers import agents, admin, uploads, contact, content, admin_kyc, payments, admin_team, deal_documents
 import app.services.notification_dispatch  # noqa: F401  (registers after-commit delivery)
 from app.routers.crypto import router as crypto_router, admin_router as crypto_admin_router
 
@@ -157,6 +158,8 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Idempotency-Replayed", "X-RateLimit-Remaining", "Retry-After"],
 )
+# Outermost: compress JSON/HTML responses over 1 KB (deal lists, dashboards, documents).
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ─── Static file serving (dev only) ──────────────────────────────────────────
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
@@ -169,6 +172,7 @@ _V1 = "/api/v1"
 app.include_router(auth.router, prefix=_V1)
 app.include_router(users.router, prefix=_V1)
 app.include_router(transactions.router, prefix=_V1)
+app.include_router(deal_documents.router, prefix=_V1)
 app.include_router(wallet.router, prefix=_V1)
 app.include_router(disputes.router, prefix=_V1)
 app.include_router(messages.router, prefix=_V1)

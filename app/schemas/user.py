@@ -11,6 +11,9 @@ class UserOut(BaseModel):
     email: str
     role: str
     avatar_url: Optional[str] = None
+    business_name: Optional[str] = None
+    business_logo_url: Optional[str] = None
+    receipt_template: Optional[str] = None
     is_kyc_verified: bool
     is_active: bool
     is_email_verified: bool

@@ -15,6 +15,10 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String(20), nullable=False, default="buyer")  # buyer | seller
     avatar_url = Column(String, nullable=True)
+    # Branding for deal receipts (logo shown on receipts for deals where this user is the buyer)
+    business_name = Column(String(200), nullable=True)
+    business_logo_url = Column(String, nullable=True)
+    receipt_template = Column(String(20), nullable=True)   # classic | modern | minimal
     is_kyc_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     is_email_verified = Column(Boolean, default=False)

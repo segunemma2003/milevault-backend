@@ -99,6 +99,9 @@ def milestone_to_public_dict(m: Milestone) -> Dict[str, Any]:
         "percentage_of_total": m.percentage_of_total,
         "attachments": m.attachments or [],
         "supporting_documents": m.supporting_documents or [],
+        "handover_confirmed_at": m.handover_confirmed_at.isoformat() if getattr(m, "handover_confirmed_at", None) else None,
+        "handover_code_active": bool(getattr(m, "handover_code_hash", None) and m.handover_code_expires_at
+                                     and m.handover_code_expires_at > datetime.utcnow()),
         "created_at": m.created_at,
     }
 

@@ -113,3 +113,12 @@ ALTER TABLE deal_reviews ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCE
 ALTER TABLE deal_reviews DROP CONSTRAINT IF EXISTS uq_review_per_party;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_review_deal ON deal_reviews(transaction_id, reviewer_id) WHERE milestone_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_review_milestone ON deal_reviews(milestone_id, reviewer_id) WHERE milestone_id IS NOT NULL;
+
+-- Deal documents: receipt branding, OTP handover (deal_contracts table is created by create_all)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS business_name VARCHAR(200);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS business_logo_url VARCHAR;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS receipt_template VARCHAR(20);
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS handover_code_hash VARCHAR(128);
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS handover_code_expires_at TIMESTAMP;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS handover_attempts INTEGER DEFAULT 0;
+ALTER TABLE milestones ADD COLUMN IF NOT EXISTS handover_confirmed_at TIMESTAMP;

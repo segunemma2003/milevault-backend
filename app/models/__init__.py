@@ -1,5 +1,5 @@
 from app.models.user import User, UserSettings
-from app.models.transaction import Transaction, Milestone, CancellationRequest
+from app.models.transaction import Transaction, Milestone, CancellationRequest, DealContract
 from app.models.wallet import WalletBalance, WalletTransaction
 from app.models.dispute import Dispute, DisputeDocument
 from app.models.message import ChatMessage, DirectMessage
