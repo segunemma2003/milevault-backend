@@ -56,4 +56,4 @@ def test_rollback_delivers_nothing(db):
 def test_link_mapping():
     base = nd._link_for({"type": "payment"})
     assert base.endswith("/dashboard/wallet")
-    assert nd._link_for({"type": "x", "related_item_type": "transaction", "related_item_id": "T1"}).endswith("/dashboard/transactions/T1")
+    assert nd._link_for({"type": "x", "related_item_type": "transaction", "related_item_id": "T1"}).endswith("/dashboard/deals/T1")

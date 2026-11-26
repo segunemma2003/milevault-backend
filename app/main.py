@@ -161,6 +161,37 @@ app.add_middleware(
 # Outermost: compress JSON/HTML responses over 1 KB (deal lists, dashboards, documents).
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+
+class SlowRequestLog:
+    """Logs any HTTP request slower than 0.8s (method, path with ids masked, status, time) so slow
+    pages can be traced to the exact API call in the Railway logs. Plain ASGI: adds no overhead."""
+    _ID = __import__("re").compile(r"/[0-9a-fA-F-]{16,}")
+
+    def __init__(self, app, threshold: float = 0.8):
+        self.app, self.threshold = app, threshold
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        import time
+        start, status = time.perf_counter(), {"code": 0}
+
+        async def _send(msg):
+            if msg["type"] == "http.response.start":
+                status["code"] = msg["status"]
+            await send(msg)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            took = time.perf_counter() - start
+            if took >= self.threshold:
+                path = self._ID.sub("/{id}", scope.get("path", ""))
+                logger.warning("SLOW %s %s -> %s in %.2fs", scope.get("method"), path, status["code"], took)
+
+
+app.add_middleware(SlowRequestLog)
+
 # ─── Static file serving (dev only) ──────────────────────────────────────────
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 if not settings.is_production:

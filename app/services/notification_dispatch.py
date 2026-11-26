@@ -34,7 +34,7 @@ def _link_for(n: dict) -> str:
     base = settings.FRONTEND_URL.rstrip("/")
     rid, rtype, ntype = n.get("related_item_id"), (n.get("related_item_type") or ""), (n.get("type") or "")
     if rid and rtype == "transaction":
-        return f"{base}/dashboard/transactions/{rid}"
+        return f"{base}/dashboard/deals/{rid}"
     if rid and rtype == "dispute":
         return f"{base}/dashboard/disputes"
     if ntype == "payment" or rtype == "wallet":
