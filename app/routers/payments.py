@@ -116,6 +116,21 @@ class NairaDepositRequest(BaseModel):
     amount: float
 
 
+@router.get("/deposit/naira/quote")
+def naira_deposit_quote(amount: float, current_user: User = Depends(get_current_user)):
+    """What the payer will pay at checkout for `amount` to land in the wallet (fees shown up front)."""
+    from app.services import payhub
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_AMOUNT", "message": "Enter an amount."})
+    if not payhub.enabled() or not settings.PAYHUB_PASS_FEE_TO_PAYER:
+        return {"amount": f"{amount:.2f}", "total": f"{amount:.2f}", "fee": "0.00"}
+    try:
+        q = payhub.fee_quote(amount)
+    except Exception:
+        raise HTTPException(status_code=502, detail={"error": "QUOTE_FAILED", "message": "Couldn't get the fee right now."})
+    return {"amount": str(q["amount"]), "total": str(q["total"]), "fee": str(q["fee"])}
+
+
 @router.post("/deposit/naira")
 def start_naira_deposit(body: NairaDepositRequest, current_user: User = Depends(get_current_user),
                         db: Session = Depends(get_db)):
