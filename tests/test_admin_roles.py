@@ -88,3 +88,24 @@ def test_add_change_and_remove_team_members(db, monkeypatch):
     assert "removed" in admin_team.remove_member(fin.id, db, boss)["message"]
     db.refresh(fin)
     assert not fin.is_admin and fin.admin_role is None
+
+
+def test_verified_name_is_locked_and_support_can_correct_it(db):
+    from app.routers import users, admin_kyc
+    from app.schemas.user import UpdateProfileRequest
+    u = mk(db, "u@x.com", admin=False)
+    u.first_name, u.last_name = "Segun", "Test"
+    db.commit()
+    users.update_profile(UpdateProfileRequest(first_name="Seg"), u, db)          # not verified yet: editable
+    assert u.first_name == "Seg"
+    u.is_kyc_verified = True
+    db.commit()
+    with pytest.raises(HTTPException) as e:
+        users.update_profile(UpdateProfileRequest(last_name="Bamidele"), u, db)
+    assert e.value.detail["error"] == "NAME_LOCKED"
+    users.update_profile(UpdateProfileRequest(first_name="Seg", bio="hi"), u, db)  # unchanged name + other fields ok
+    sup = mk(db, "s@x.com", "support")
+    admin_kyc.set_legal_name(u.id, admin_kyc.LegalNameIn(first_name="Segun", last_name="Bamidele"), db, sup)
+    assert (u.first_name, u.last_name) == ("Segun", "Bamidele")
+    from app.services.payment_flows import names_match
+    assert names_match(u.first_name, u.last_name, "SEGUN EMMANUEL BAMIDELE")

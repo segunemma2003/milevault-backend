@@ -51,7 +51,17 @@ def update_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    for field, value in payload.model_dump(exclude_none=True).items():
+    changes = payload.model_dump(exclude_none=True)
+    # Your verified name must match your ID and bank accounts, so it's locked once KYC is approved
+    # (otherwise anyone could rename themselves to match someone else's account). Support can
+    # correct it from the KYC review, checked against the ID.
+    if current_user.is_kyc_verified:
+        for f in ("first_name", "last_name"):
+            if f in changes and (changes[f] or "").strip() != (getattr(current_user, f) or "").strip():
+                raise HTTPException(status_code=422, detail={
+                    "error": "NAME_LOCKED",
+                    "message": "Your name is locked to your verified ID. Contact support@bondrova.com to correct it."})
+    for field, value in changes.items():
         setattr(current_user, field, value)
     db.commit()
     db.refresh(current_user)

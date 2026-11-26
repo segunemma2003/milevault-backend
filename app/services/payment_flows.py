@@ -198,6 +198,7 @@ def start_naira_deposit(db: Session, user: User, amount) -> dict:
         raise FlowError("DEPOSIT_START_FAILED", f"Couldn't start the payment: {exc}", 502)
     db.add(WalletTransaction(user_id=user.id, type="deposit", amount=float(credit), currency="NGN",
                              status="pending", method="payhub", reference=charge["reference"],
+                             fee=float(total - credit) or None,  # processing fees the payer covered at checkout
                              description=f"Deposit via card/bank transfer (pays NGN {total} incl. fee)"))
     db.commit()
     return {"reference": charge["reference"], "checkout_url": charge["checkout_url"],
@@ -228,8 +229,15 @@ def handle_payhub_charge(db: Session, reference: str) -> str:
             db.rollback()
             return "duplicate"
         txn.status = "completed"
-        create_notification(db, txn.user_id, "Deposit received",
-                            f"NGN {ledger.quantize(txn.amount, 'NGN', db)} has been added to your wallet.", "payment")
+        # This notification is also emailed (Bondrova-branded) — it is the user's receipt.
+        added = float(ledger.quantize(txn.amount, "NGN", db))
+        fee = float(txn.fee or 0)
+        receipt = f"₦{added:,.2f} has been added to your wallet."
+        if fee > 0:
+            receipt += (f" You paid ₦{added + fee:,.2f} at checkout: ₦{added:,.2f} to your wallet plus "
+                        f"₦{fee:,.2f} payment processing fees.")
+        receipt += f" Reference: {reference}."
+        create_notification(db, txn.user_id, "Deposit received — receipt", receipt, "payment")
         db.commit()
         return "credited"
     if c["status"] == "failed":

@@ -2,6 +2,7 @@
 from datetime import datetime
 from typing import Optional
 
+from pydantic import BaseModel
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -86,6 +87,8 @@ def list_submissions(
             "user": {
                 "id": u.id,
                 "name": f"{u.first_name} {u.last_name}".strip(),
+                "first_name": u.first_name,
+                "last_name": u.last_name,
                 "email": u.email,
                 "country_code": getattr(u, "country_code", None),
                 "is_kyc_verified": u.is_kyc_verified,
@@ -164,3 +167,25 @@ def revoke_verification(
     _notify(db, user.id, "KYC Verification Revoked", f"Your verification was revoked: {reason.strip()}")
     db.commit()
     return {"message": "Verification revoked."}
+
+
+class LegalNameIn(BaseModel):
+    first_name: str
+    last_name: str
+
+
+@router.put("/users/{user_id}/name", summary="Set a user's legal name to match their verified ID")
+def set_legal_name(user_id: str, body: LegalNameIn, db: Session = Depends(get_db),
+                   admin: User = Depends(require_admin("support"))):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    first, last = body.first_name.strip(), body.last_name.strip()
+    if len(first) < 2 or len(last) < 2:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_NAME", "message": "Enter the first and last name as on the ID."})
+    old = f"{user.first_name} {user.last_name}"
+    user.first_name, user.last_name = first, last
+    _notify(db, user.id, "Your name was updated",
+            f"Your verified name is now {first} {last} (previously {old}), matching your ID.")
+    db.commit()
+    return {"message": f"Name updated to {first} {last}.", "first_name": first, "last_name": last}
