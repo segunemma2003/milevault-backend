@@ -150,3 +150,21 @@ class DealContract(Base):
     seller_signed_at = Column(DateTime, nullable=True)
     seller_signed_ip = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IssuedDocument(Base):
+    """
+    Every receipt/contract Bondrova issues gets a public code (BDR-2026-XXXXXX) and a snapshot of
+    the figures printed on it, so anyone holding the document can check it at /verify/<code>.
+    Issuing the same figures again reuses the same code; new payments produce a new code and the
+    older one is shown as "out of date" (never as fake).
+    """
+    __tablename__ = "issued_documents"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    code = Column(String(32), nullable=False, unique=True, index=True)
+    kind = Column(String(20), nullable=False)            # receipt | contract
+    transaction_id = Column(String, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot = Column(JSON, nullable=False)
+    content_hash = Column(String(64), nullable=False, index=True)
+    issued_at = Column(DateTime, default=datetime.utcnow)

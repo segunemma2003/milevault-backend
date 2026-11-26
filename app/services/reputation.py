@@ -30,7 +30,8 @@ def public_profile(db: Session, user: User) -> dict:
         or_(Transaction.buyer_id == user.id, Transaction.seller_id == user.id))
     as_buyer = completed.filter(Transaction.buyer_id == user.id).count()
     as_seller = completed.filter(Transaction.seller_id == user.id).count()
-    value = completed.with_entities(func.coalesce(func.sum(Transaction.amount), 0.0)).scalar() or 0.0
+    # Deals are in different currencies — convert each to USD before adding them up.
+    value = sum(trust_score._to_usd(db, a, c) for a, c in completed.with_entities(Transaction.amount, Transaction.currency).all())
 
     def ratings(role: str) -> dict:
         avg, n = (db.query(func.avg(DealReview.rating), func.count(DealReview.id))
@@ -51,7 +52,7 @@ def public_profile(db: Session, user: User) -> dict:
     created = user.created_at or datetime.utcnow()
     return {
         "id": user.id,
-        "display_name": f"{user.first_name} {(user.last_name or '')[:1]}.".strip(),
+        "display_name": trust_score.public_profile_name(user),
         "business_name": getattr(user, "business_name", None),
         "avatar_url": user.avatar_url,
         "trust": {"score": user.trust_score, "band": trust_score.band(user.trust_score),
@@ -62,7 +63,7 @@ def public_profile(db: Session, user: User) -> dict:
             "completed_as_seller": as_seller,
             "completed_value_usd": round(float(value), 2),
             "identity_verified": bool(user.is_kyc_verified),
-            "bvn_verified": bool(getattr(user, "bvn_verified_at", None)),
+            "bvn_verified": getattr(user, "bvn_status", None) == "verified",
             "email_verified": bool(user.is_email_verified),
             "member_since": created.date().isoformat(),
             "days_on_platform": max(0, (datetime.utcnow() - created).days),

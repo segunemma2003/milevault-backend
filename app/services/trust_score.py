@@ -188,6 +188,11 @@ def summary_line(db: Session, user) -> str:
     return " · ".join(parts) + f". What this means: {meaning(user.trust_score)}"
 
 
+def public_profile_name(user) -> str:
+    last = (user.last_name or "").strip()
+    return f"{(user.first_name or '').strip()} {last[:1] + '.' if last else ''}".strip()
+
+
 def public_profile(db: Session, user) -> dict:
     """What another user may see about this person before dealing with them."""
     if user.trust_score is None:

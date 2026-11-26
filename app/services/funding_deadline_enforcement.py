@@ -73,6 +73,10 @@ def enforce_funding_deadline_if_due(db: Session, transaction_id: str) -> Dict[st
         from app.services import trust_score
         db.flush()
         trust_score.recompute_ids(db, [tx.buyer_id], "Deal not funded before the deadline")
+        if refunded > 0:
+            from app.services.deal_documents import queue_receipt_email
+            queue_receipt_email(db, tx, "The deal was cancelled because it wasn't fully funded by the deadline, "
+                                        "and the part-payment was returned to the buyer.")
         tx.funding_deadline = None
         create_notification(
             db,

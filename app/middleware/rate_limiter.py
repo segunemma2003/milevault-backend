@@ -22,6 +22,7 @@ LIMITS: dict = {
     "/api/v1/disputes": (3, 86400),            # 3 disputes/day
     "/api/v1/wallet/verify": (20, 60),         # 20 payment verifications/min
     "/api/v1/agents/register": (3, 86400),     # 3 agent registration attempts/day
+    "/api/v1/documents/verify": (30, 60),     # public document checks — stops code guessing
     "default": (120, 60),                      # 120 req/min for everything else
 }
 

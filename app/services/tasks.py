@@ -359,6 +359,8 @@ def process_refund(self, refund_id: str) -> dict:
             amount=refund.amount,
             currency=refund.currency,
             status="completed",
+            transaction_id=str(refund.transaction_id),
+            milestone_id=str(refund.milestone_id) if getattr(refund, "milestone_id", None) else None,
             description=f"Refund from dispute — Ref: {refund_id[:8]}",
         )
         db.add(wallet_tx)

@@ -194,6 +194,9 @@ def accept_request(db: Session, tx: Transaction, user_id: str, note: str | None)
     tx.status = "cancelled"
     tx.funded_milestones = 0
     tx.funding_deadline = None
+    if refunded:
+        from app.services.deal_documents import queue_receipt_email
+        queue_receipt_email(db, tx, "The deal was cancelled by agreement and the money still in escrow was returned to the buyer.")
     return refunded
 
 

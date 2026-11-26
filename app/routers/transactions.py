@@ -1333,6 +1333,8 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         from app.services.agent_fee_service import settle_held_agent_fees_on_transaction_completed
 
         settle_held_agent_fees_on_transaction_completed(db, tx)
+        from app.services.deal_documents import queue_receipt_email
+        queue_receipt_email(db, tx, "Your deal is complete and every milestone has been released.")
 
     # Trust Scores for both sides (after the deal's status is final, so this deal counts)
     db.flush()
