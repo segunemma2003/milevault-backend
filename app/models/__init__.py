@@ -1,5 +1,5 @@
 from app.models.user import User, UserSettings
-from app.models.transaction import Transaction, Milestone
+from app.models.transaction import Transaction, Milestone, CancellationRequest
 from app.models.wallet import WalletBalance, WalletTransaction
 from app.models.dispute import Dispute, DisputeDocument
 from app.models.message import ChatMessage, DirectMessage
@@ -8,7 +8,7 @@ from app.models.notification import Notification
 
 __all__ = [
     "User", "UserSettings",
-    "Transaction", "Milestone",
+    "Transaction", "Milestone", "CancellationRequest",
     "WalletBalance", "WalletTransaction",
     "Dispute", "DisputeDocument",
     "ChatMessage", "DirectMessage",

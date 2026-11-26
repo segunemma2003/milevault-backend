@@ -53,6 +53,10 @@ class Transaction(Base):
     chat_messages = relationship("ChatMessage", back_populates="transaction", cascade="all, delete-orphan")
     wallet_transactions = relationship("WalletTransaction", back_populates="linked_transaction")
     agent_request = relationship("AgentRequest", back_populates="transaction", uselist=False, cascade="all, delete-orphan")
+    cancellation_requests = relationship(
+        "CancellationRequest", back_populates="transaction", cascade="all, delete-orphan",
+        order_by="CancellationRequest.created_at",
+    )
 
 
 class Milestone(Base):
@@ -96,3 +100,24 @@ class Milestone(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     transaction = relationship("Transaction", back_populates="milestones")
+
+
+class CancellationRequest(Base):
+    """
+    Once a deal has started (the invitation was accepted) neither party can cancel it alone.
+    One party asks; the deal is cancelled only when the OTHER party accepts. On acceptance every
+    milestone's unreleased escrow goes back to the buyer (released milestones stay paid).
+    """
+    __tablename__ = "transaction_cancellation_requests"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    transaction_id = Column(String, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    requested_by = Column(String, ForeignKey("users.id"), nullable=False)
+    reason = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending | accepted | rejected | withdrawn
+    responded_by = Column(String, ForeignKey("users.id"), nullable=True)
+    response_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    responded_at = Column(DateTime, nullable=True)
+
+    transaction = relationship("Transaction", back_populates="cancellation_requests")

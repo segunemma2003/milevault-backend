@@ -186,7 +186,14 @@ def transaction_to_dict(tx: Transaction) -> dict:
         "milestones": [milestone_to_public_dict(m) for m in tx.milestones],
         "counterparty_email": tx.counterparty_email,
         "last_reminded_at": tx.last_reminded_at.isoformat() if getattr(tx, "last_reminded_at", None) else None,
+        "cancellation_request": _latest_cancellation(tx),
     }
+
+
+def _latest_cancellation(tx: Transaction) -> Optional[dict]:
+    from app.services.deal_cancellation import request_to_dict
+    reqs = list(getattr(tx, "cancellation_requests", None) or [])
+    return request_to_dict(reqs[-1]) if reqs else None
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -388,22 +395,16 @@ def update_transaction(
     if tx.buyer_id != current_user.id and tx.seller_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    for field, value in payload.model_dump(exclude_none=True).items():
+    if payload.status is not None and payload.status != tx.status:
+        # Status only moves through the deal actions (accept, fund, deliver, approve, cancel request…).
+        raise HTTPException(status_code=422, detail={
+            "error": "STATUS_NOT_EDITABLE",
+            "message": "A deal's status can't be edited directly. To cancel a started deal, send a cancellation request.",
+        })
+    for field, value in payload.model_dump(exclude_none=True, exclude={"status"}).items():
         setattr(tx, field, value)
     db.commit()
     db.refresh(tx)
-
-    other_user_id = tx.seller_id if tx.buyer_id == current_user.id else tx.buyer_id
-    if other_user_id and payload.status:
-        create_notification(
-            db, other_user_id,
-            "Transaction Updated",
-            f"Transaction '{tx.title}' status changed to {payload.status}",
-            "transaction",
-            related_item_id=tx.id,
-            related_item_type="transaction",
-        )
-
     return transaction_to_dict(tx)
 
 
@@ -423,12 +424,146 @@ def cancel_transaction(
     elif tx.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the buyer can cancel")
 
+    from app.services.deal_cancellation import PRE_START_STATUSES
+    if tx.status not in PRE_START_STATUSES:
+        if tx.status in ("completed", "cancelled", "refunded", "declined", "expired"):
+            raise HTTPException(status_code=409, detail={"error": "DEAL_CLOSED", "message": f"This deal is already {tx.status}."})
+        raise HTTPException(status_code=409, detail={
+            "error": "CANCEL_REQUIRES_AGREEMENT",
+            "message": "This deal has started, so it can only be cancelled if the other party agrees. Send a cancellation request instead.",
+        })
+
     from app.services.agent_fee_service import refund_held_agent_fees_for_transaction
 
     refund_held_agent_fees_for_transaction(db, tx)
     tx.status = "cancelled"
     db.commit()
     return {"message": "Transaction cancelled"}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Mutual cancellation of a started deal (see app/services/deal_cancellation.py)
+# ══════════════════════════════════════════════════════════════════
+
+class CancelRequestBody(BaseModel):
+    reason: str
+
+
+class CancelResponseBody(BaseModel):
+    note: Optional[str] = None
+
+
+def _locked_deal(db: Session, transaction_id: str) -> Transaction:
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).with_for_update().first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return tx
+
+
+def _cancel_error(e) -> HTTPException:
+    return HTTPException(status_code=e.status_code, detail={"error": e.error, "message": e.message})
+
+
+def _notify_deal(db: Session, user_id: Optional[str], title: str, body: str, tx: Transaction) -> None:
+    if user_id:
+        create_notification(db, user_id, title, body, "transaction",
+                            related_item_id=tx.id, related_item_type="transaction")
+
+
+@router.post("/{transaction_id}/cancel-request", status_code=status.HTTP_201_CREATED)
+def request_cancellation(
+    transaction_id: str,
+    body: CancelRequestBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Ask the other party to agree to cancel a deal that has started."""
+    from app.services import deal_cancellation as dc
+    tx = _locked_deal(db, transaction_id)
+    try:
+        req = dc.create_request(db, tx, current_user.id, body.reason)
+    except dc.CancellationError as e:
+        raise _cancel_error(e)
+    _notify_deal(db, dc.other_party(tx, current_user.id), "Cancellation requested",
+                 f"{current_user.first_name} asked to cancel '{tx.title}'. Reason: {req.reason} "
+                 "The deal continues unless you accept.", tx)
+    db.commit()
+    return {"message": "Cancellation request sent. The other party has to accept it.",
+            "cancellation_request": dc.request_to_dict(req)}
+
+
+@router.post("/{transaction_id}/cancel-request/accept")
+def accept_cancellation(
+    transaction_id: str,
+    body: CancelResponseBody = Body(default_factory=CancelResponseBody),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The other party agrees: the deal is cancelled and unreleased escrow goes back to the buyer."""
+    from app.services import deal_cancellation as dc
+    tx = _locked_deal(db, transaction_id)
+    try:
+        refunded = dc.accept_request(db, tx, current_user.id, body.note)
+    except dc.CancellationError as e:
+        raise _cancel_error(e)
+    except InsufficientFunds as e:
+        db.rollback()
+        logger.error("Cancel %s: buyer escrow %s < %s", transaction_id, e.have, e.need)
+        raise HTTPException(status_code=409, detail={
+            "error": "ESCROW_MISMATCH",
+            "message": "The escrow for this deal doesn't add up, so it can't be refunded automatically. Please contact support.",
+        })
+    summary = ", ".join(f"{c} {a:,.2f}" for c, a in refunded.items()) or "nothing was held in escrow"
+    _notify_deal(db, tx.buyer_id, "Deal cancelled — refund issued",
+                 f"'{tx.title}' was cancelled by agreement. Refunded to your wallet: {summary}.", tx)
+    _notify_deal(db, tx.seller_id, "Deal cancelled",
+                 f"'{tx.title}' was cancelled by agreement. Payments already released to you are unaffected.", tx)
+    db.flush()
+    trust_score.recompute_ids(db, [tx.buyer_id, tx.seller_id], "Deal cancelled by agreement")
+    db.commit()
+    return {"message": "Deal cancelled. Unreleased escrow was returned to the buyer.", "refunded": refunded}
+
+
+@router.post("/{transaction_id}/cancel-request/reject")
+def reject_cancellation(
+    transaction_id: str,
+    body: CancelResponseBody = Body(default_factory=CancelResponseBody),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The other party says no: the deal carries on."""
+    from app.services import deal_cancellation as dc
+    tx = _locked_deal(db, transaction_id)
+    try:
+        req = dc.reject_request(db, tx, current_user.id, body.note)
+    except dc.CancellationError as e:
+        raise _cancel_error(e)
+    _notify_deal(db, req.requested_by, "Cancellation declined",
+                 f"{current_user.first_name} declined to cancel '{tx.title}'. The deal continues."
+                 + (f" Note: {req.response_note}" if req.response_note else "")
+                 + " If you can't agree, you can open a dispute.", tx)
+    db.commit()
+    return {"message": "Cancellation request declined. The deal continues.",
+            "cancellation_request": dc.request_to_dict(req)}
+
+
+@router.post("/{transaction_id}/cancel-request/withdraw")
+def withdraw_cancellation(
+    transaction_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The requester takes the request back."""
+    from app.services import deal_cancellation as dc
+    tx = _locked_deal(db, transaction_id)
+    try:
+        req = dc.withdraw_request(db, tx, current_user.id)
+    except dc.CancellationError as e:
+        raise _cancel_error(e)
+    _notify_deal(db, dc.other_party(tx, current_user.id), "Cancellation request withdrawn",
+                 f"{current_user.first_name} withdrew the request to cancel '{tx.title}'.", tx)
+    db.commit()
+    return {"message": "Cancellation request withdrawn.", "cancellation_request": dc.request_to_dict(req)}
 
 
 # Milestone endpoints
