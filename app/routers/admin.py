@@ -29,6 +29,9 @@ from app.models.wallet import WalletBalance, WalletTransaction
 from app.models.notification import Notification
 from app.services.cache_service import cache_delete
 
+import logging
+logger = logging.getLogger("milevault.admin")
+
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
@@ -666,8 +669,18 @@ def create_refund(
     db.commit()
 
     # Queue only AFTER commit — otherwise the worker can run before the refund row exists.
+    # The refund row is already committed: a failure to queue must not turn into an error
+    # response (the admin would retry and create a second refund). Run it here instead —
+    # process_refund is idempotent per refund id.
     from app.services.tasks import process_refund
-    process_refund.delay(str(refund.id))
+    try:
+        process_refund.delay(str(refund.id))
+    except Exception as exc:
+        logger.warning("process_refund could not be queued (%s); running inline", exc)
+        try:
+            process_refund(str(refund.id))
+        except Exception:
+            logger.exception("Inline refund %s failed; it stays pending for a retry", refund.id)
     return {"message": "Refund created and queued for processing.", "refund_id": str(refund.id)}
 
 

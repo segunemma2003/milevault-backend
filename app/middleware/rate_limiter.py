@@ -4,6 +4,7 @@ Limits keyed on (IP + path) for anonymous, (user_id + path) for authenticated.
 """
 import logging
 from time import time
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -78,7 +79,8 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         client_key = _client_key(request)
         rate_key = f"rate:{client_key}:{path.split('?')[0]}"
 
-        allowed, remaining, retry_after = _sliding_window_check(rate_key, limit, window)
+        # Redis calls are blocking: run them off the event loop so a slow Redis can't stall every request.
+        allowed, remaining, retry_after = await run_in_threadpool(_sliding_window_check, rate_key, limit, window)
 
         if not allowed:
             return JSONResponse(
