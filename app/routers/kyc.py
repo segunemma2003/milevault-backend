@@ -201,6 +201,7 @@ async def upload_kyc_document(
         related_item_id=doc.id,
         related_item_type="kyc",
     )
+    db.commit()
 
     return {
         "id": doc.id,

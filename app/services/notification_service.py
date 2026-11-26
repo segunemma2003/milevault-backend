@@ -20,6 +20,8 @@ def create_notification(
         related_item_type=related_item_type,
     )
     db.add(notification)
-    db.commit()
+    # Saved with the caller's work when the CALLER commits (and discarded if it rolls back) — committing
+    # here used to save half-finished operations, e.g. a payment release before its fee and receipt.
     # Live push + email happen after commit in app/services/notification_dispatch.py
+    db.flush()
     return notification

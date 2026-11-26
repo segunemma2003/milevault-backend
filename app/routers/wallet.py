@@ -428,6 +428,7 @@ def verify_deposit_endpoint(
         f"Your deposit of {result['currency']} {result['amount']:.2f} was successful.",
         "payment",
     )
+    db.commit()
 
     return {
         "message": "Deposit successful. Wallet credited.",
@@ -716,6 +717,7 @@ def withdraw(
         f"Withdrawal of {currency_upper} {payload.amount:.2f} is being processed. It typically takes 1–3 business days.",
         "payment",
     )
+    db.commit()
 
     return {
         "message": "Withdrawal request submitted successfully.",
@@ -822,6 +824,7 @@ def transfer_funds(
         f"You received {currency_upper} {payload.amount:.2f} from {current_user.email}.",
         "payment",
     )
+    db.commit()
 
     return {
         "message": "Transfer completed successfully.",

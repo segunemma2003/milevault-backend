@@ -204,6 +204,7 @@ def _notify_admins(db: Session, title: str, message: str, ticket_id: str) -> Non
     from app.services.notification_service import create_notification
     for admin in db.query(User).filter(User.is_admin.is_(True)).all():
         create_notification(db, str(admin.id), title, message, "support", ticket_id, "support_ticket")
+    db.commit()
 
 
 @router.post("/support/inbound", include_in_schema=False)

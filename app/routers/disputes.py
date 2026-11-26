@@ -118,6 +118,7 @@ def create_dispute(
             related_item_id=dispute.id,
             related_item_type="dispute",
         )
+        db.commit()
 
     return dispute_to_dict(dispute)
 

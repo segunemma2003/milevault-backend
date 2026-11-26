@@ -342,6 +342,7 @@ def create_transaction(
             args=(raw_email, inviter_name, tx.title, tx.id, trust_score.summary_line(db, current_user)),
             daemon=True,
         ).start()
+    db.commit()  # the invitation notification (and any first Trust Score calculation)
 
     return transaction_to_dict(tx)
 
@@ -821,6 +822,7 @@ def remind_counterparty(
         ).start()
     else:
         raise HTTPException(status_code=409, detail="No counterparty linked to this transaction")
+    db.commit()
 
     return {"message": "Reminder sent."}
 
