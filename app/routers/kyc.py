@@ -124,6 +124,8 @@ def get_kyc_status(current_user: User = Depends(get_current_user), db: Session =
         "is_kyc_verified": current_user.is_kyc_verified,
         "documents": doc_list,
         "overall_status": overall_status,
+        "bvn": bvn_view(current_user),
+        "bvn_required": bvn_required(db, current_user),
     }
 
 
@@ -209,3 +211,91 @@ async def upload_kyc_document(
         "status": doc.status,
         "created_at": doc.created_at,
     }
+
+
+# ─── BVN (through PayHub → Paystack customer validation) ──────────────────────
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class BvnIn(BaseModel):
+    bvn: str
+    bank_code: str
+    account_number: str
+
+
+def bvn_required(db: Session, user: User) -> bool:
+    """Nigerian users need a verified BVN for KYC (admin can switch this off)."""
+    from app.services.fees import platform_settings
+    from app.services import payhub
+    s = platform_settings(db)
+    return bool(getattr(s, "require_bvn", True)) and payhub.enabled() and (user.country_code or "NG").upper() == "NG"
+
+
+def bvn_view(user: User) -> dict:
+    return {"status": user.bvn_status or "not_submitted", "last4": user.bvn_last4,
+            "failure_reason": user.bvn_failure_reason, "verified_at": user.bvn_verified_at}
+
+
+@router.post("/bvn", status_code=202)
+def submit_bvn(body: BvnIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """BVN + a bank account in your name: Paystack confirms with the bank that they belong to you."""
+    import re
+    from app.services import payhub
+    if current_user.bvn_status == "verified":
+        raise HTTPException(status_code=409, detail="Your BVN is already verified.")
+    if not payhub.enabled():
+        raise HTTPException(status_code=503, detail="BVN verification isn't available yet.")
+    bvn = re.sub(r"\D", "", body.bvn or "")
+    acct = re.sub(r"\D", "", body.account_number or "")
+    if len(bvn) != 11:
+        raise HTTPException(status_code=422, detail="Your BVN is 11 digits (dial *565*0# to get it).")
+    if len(acct) != 10:
+        raise HTTPException(status_code=422, detail="Enter your 10-digit bank account number.")
+    if not (current_user.first_name and current_user.last_name):
+        raise HTTPException(status_code=422, detail="Add your first and last name (as on your ID) first.")
+    try:
+        check = payhub.verify_bvn(external_ref=str(current_user.id), email=current_user.email,
+                                  first_name=current_user.first_name, last_name=current_user.last_name,
+                                  bvn=bvn, bank_code=body.bank_code, account_number=acct)
+    except payhub.PayHubError as e:
+        raise HTTPException(status_code=502, detail=f"Couldn't start the BVN check: {e}")
+    current_user.bvn_status, current_user.bvn_last4 = "pending", bvn[-4:]
+    current_user.bvn_check_id, current_user.bvn_failure_reason = check.get("id"), None
+    db.commit()
+    return {"message": "We're confirming your BVN with your bank — this usually takes a few minutes.",
+            "bvn": bvn_view(current_user)}
+
+
+def handle_identity_event(db: Session, event: str, data: dict) -> str:
+    """PayHub identity.verified / identity.failed for one of our users."""
+    from datetime import datetime
+    user = db.get(User, str(data.get("external_ref") or ""))
+    if not user:
+        return "unknown_user"
+    if data.get("id") and user.bvn_check_id and data["id"] != user.bvn_check_id:
+        return "stale_check"
+    if user.bvn_status == "verified":
+        return "already_verified"
+    if event == "identity.verified":
+        fp = data.get("bvn_fingerprint")
+        dupe = fp and db.query(User).filter(User.bvn_fingerprint == fp, User.id != user.id,
+                                            User.bvn_status == "verified").first()
+        if dupe:
+            user.bvn_status = "failed"
+            user.bvn_failure_reason = "This BVN is already linked to another Bondrova account."
+        else:
+            user.bvn_status, user.bvn_fingerprint, user.bvn_verified_at = "verified", fp, datetime.utcnow()
+            user.bvn_failure_reason = None
+    else:
+        user.bvn_status = "failed"
+        user.bvn_failure_reason = (data.get("failure_reason") or "Your BVN, bank account and name didn't match.")[:500]
+    ok = user.bvn_status == "verified"
+    create_notification(db, user.id, "BVN verified" if ok else "BVN couldn't be verified",
+                        "Your BVN has been confirmed." if ok else
+                        f"{user.bvn_failure_reason} Check your details and try again.", "kyc")
+    if ok:
+        from app.routers.admin_kyc import _recompute
+        _recompute(db, user)
+    db.commit()
+    return user.bvn_status

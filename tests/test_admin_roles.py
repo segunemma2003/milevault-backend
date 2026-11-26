@@ -109,3 +109,56 @@ def test_verified_name_is_locked_and_support_can_correct_it(db):
     assert (u.first_name, u.last_name) == ("Segun", "Bamidele")
     from app.services.payment_flows import names_match
     assert names_match(u.first_name, u.last_name, "SEGUN EMMANUEL BAMIDELE")
+
+
+# ─── BVN via PayHub ──────────────────────────────────────────────────────────
+
+def test_bvn_flow_verified_duplicate_and_kyc_requirement(db, monkeypatch):
+    from app.routers import kyc, admin_kyc
+    from app.services import payhub
+    from app.models.kyc import KycDocument
+    monkeypatch.setattr(payhub, "enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(payhub, "verify_bvn", lambda **k: calls.append(k) or {"id": f"chk-{len(calls)}", "status": "pending"})
+    a = mk(db, "a@x.com", admin=False); a.first_name, a.last_name = "Ada", "Obi"
+    b = mk(db, "b@x.com", admin=False); b.first_name, b.last_name = "Bo", "Ade"
+    db.commit()
+
+    with pytest.raises(HTTPException):
+        kyc.submit_bvn(kyc.BvnIn(bvn="123", bank_code="058", account_number="0123456789"), a, db)
+    out = kyc.submit_bvn(kyc.BvnIn(bvn="222-3334-4455", bank_code="058", account_number="0123456789"), a, db)
+    assert out["bvn"]["status"] == "pending" and calls[0]["bvn"] == "22233344455" and a.bvn_last4 == "4455"
+
+    # Documents approved but BVN still pending → not verified yet (Nigerian user)
+    for t in ("passport", "address_proof", "liveness"):
+        db.add(KycDocument(user_id=a.id, type=t, file_url="s3:k", status="verified"))
+    db.commit()
+    admin_kyc._recompute(db, a)
+    assert not a.is_kyc_verified
+
+    assert kyc.handle_identity_event(db, "identity.verified", {"id": "chk-1", "external_ref": a.id, "bvn_fingerprint": "fp1"}) == "verified"
+    db.refresh(a)
+    assert a.bvn_status == "verified" and a.is_kyc_verified   # BVN completed the KYC
+
+    # Same BVN on a second account is refused
+    kyc.submit_bvn(kyc.BvnIn(bvn="22233344455", bank_code="058", account_number="0123456780"), b, db)
+    assert kyc.handle_identity_event(db, "identity.verified", {"id": "chk-2", "external_ref": b.id, "bvn_fingerprint": "fp1"}) == "failed"
+    db.refresh(b)
+    assert "another Bondrova account" in b.bvn_failure_reason
+    # A failed check can be retried; a stale result for an old check is ignored
+    kyc.submit_bvn(kyc.BvnIn(bvn="99988877766", bank_code="058", account_number="0123456780"), b, db)
+    assert kyc.handle_identity_event(db, "identity.failed", {"id": "chk-2", "external_ref": b.id}) == "stale_check"
+
+
+def test_receipt_copy_goes_to_the_company_inbox(db, monkeypatch):
+    from app.services import receipts
+    from app.models.currency import PlatformSettings
+    db.add(PlatformSettings(id="default", support_email="support@bondrova.com", receipts_copy_email="finance@bondrova.com"))
+    db.commit()
+    sent = []
+    import app.routers.auth as auth
+    monkeypatch.setattr(auth, "_send_email_direct", lambda to, subject, body: sent.append((to, subject)))
+    monkeypatch.setattr(receipts.threading, "Thread", lambda target, daemon: type("T", (), {"start": lambda self: target()})())
+    receipts.send_copy(db, kind="Deposit", user_name="Ada Obi", user_email="a@x.com",
+                       lines=[("Added to wallet", "NGN 100,000.00"), ("Reference", "phb_1")])
+    assert sent and sent[0][0] == "finance@bondrova.com" and "Deposit" in sent[0][1]

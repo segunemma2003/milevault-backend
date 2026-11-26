@@ -26,6 +26,13 @@ class User(Base):
     # Which admin areas this admin may use: "super" (everything), "finance" or "support".
     # NULL on an admin means super (admins created before roles existed).
     admin_role = Column(String(20), nullable=True)
+    # BVN check (via PayHub → Paystack): never the full BVN — a fingerprint and the last 4 digits.
+    bvn_status = Column(String(20), nullable=True)   # pending | verified | failed
+    bvn_last4 = Column(String(4), nullable=True)
+    bvn_fingerprint = Column(String(64), nullable=True, index=True)
+    bvn_check_id = Column(String(64), nullable=True)
+    bvn_failure_reason = Column(String(500), nullable=True)
+    bvn_verified_at = Column(DateTime, nullable=True)
     is_agent = Column(Boolean, default=False)
     phone = Column(String(50), nullable=True)
     location = Column(String(200), nullable=True)

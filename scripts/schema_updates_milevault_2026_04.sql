@@ -91,3 +91,13 @@ ALTER TABLE milestones ADD COLUMN IF NOT EXISTS seller_fee DOUBLE PRECISION DEFA
 ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS fee DOUBLE PRECISION;
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS dispute_fee_fixed DOUBLE PRECISION DEFAULT 0;
 ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS dispute_fee_percent DOUBLE PRECISION DEFAULT 0;
+
+-- BVN verification (fingerprint + last 4 only) and receipt copies
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_status VARCHAR(20);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_last4 VARCHAR(4);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_fingerprint VARCHAR(64);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_check_id VARCHAR(64);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_failure_reason VARCHAR(500);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bvn_verified_at TIMESTAMP;
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS receipts_copy_email VARCHAR(255);
+ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS require_bvn BOOLEAN DEFAULT true;

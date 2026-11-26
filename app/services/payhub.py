@@ -106,6 +106,21 @@ PAYOUT_DONE = {"completed"}
 PAYOUT_FAILED = {"failed", "rejected"}
 
 
+# ─── Identity (BVN) ───────────────────────────────────────────────────────────
+
+def verify_bvn(*, external_ref: str, email: str, first_name: str, last_name: str, bvn: str, bank_code: str,
+               account_number: str) -> Dict[str, Any]:
+    """Start a BVN check (Paystack confirms BVN + bank account + name). Result comes by webhook."""
+    return _request("POST", "/identity/bvn", json={
+        "external_ref": external_ref, "email": email, "first_name": first_name, "last_name": last_name,
+        "bvn": bvn, "bank_code": bank_code, "account_number": account_number,
+    })
+
+
+def get_identity(check_id: str) -> Dict[str, Any]:
+    return _request("GET", f"/identity/{check_id}")
+
+
 # ─── Webhooks ─────────────────────────────────────────────────────────────────
 
 def verify_webhook(raw_body: bytes, signature_header: Optional[str], tolerance_seconds: int = 300) -> bool:

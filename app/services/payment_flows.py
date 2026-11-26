@@ -238,6 +238,9 @@ def handle_payhub_charge(db: Session, reference: str) -> str:
                         f"₦{fee:,.2f} payment processing fees.")
         receipt += f" Reference: {reference}."
         create_notification(db, txn.user_id, "Deposit received — receipt", receipt, "payment")
+        _receipt_copy(db, txn.user_id, "Deposit", [("Added to wallet", f"NGN {added:,.2f}"),
+                                                   ("Paid at checkout", f"NGN {added + fee:,.2f}"),
+                                                   ("Processing fees", f"NGN {fee:,.2f}"), ("Reference", reference)])
         db.commit()
         return "credited"
     if c["status"] == "failed":
@@ -269,7 +272,17 @@ def _record_deposit(db: Session, *, user: User, currency: str, amount, method: s
     create_notification(db, user.id, "Deposit received",
                         f"{currency} {ledger.quantize(amount, currency, db)} has been added to your wallet.", "payment")
     db.commit()
+    _receipt_copy(db, user.id, "Deposit", [("Added to wallet", f"{currency} {ledger.quantize(amount, currency, db)}"),
+                                           ("Method", method), ("Reference", reference)])
     return True
+
+
+def _receipt_copy(db: Session, user_id: str, kind: str, lines: list) -> None:
+    from app.services import receipts
+    u = db.get(User, user_id)
+    if u:
+        receipts.send_copy(db, kind=kind, user_name=f"{u.first_name or ''} {u.last_name or ''}".strip() or u.email,
+                           user_email=u.email, lines=lines)
 
 
 def handle_paystack_charge(db: Session, reference: str, hint: Optional[dict] = None) -> str:
@@ -542,6 +555,9 @@ def settle_payout(db: Session, withdrawal_id: str, *, success: bool, reason: str
         fees.debit_withdrawal(db, txn)
         txn.status = "completed"
         net = round(float(txn.amount) - float(txn.fee or 0), 2)
+        _receipt_copy(db, txn.user_id, "Withdrawal", [("Sent", f"{txn.currency} {net:,.2f}"),
+                                                      ("Fee", f"{txn.currency} {float(txn.fee or 0):,.2f}"),
+                                                      ("To", txn.description or ""), ("Reference", str(txn.id))])
         create_notification(db, txn.user_id, "Withdrawal sent",
                             f"Your withdrawal of {txn.currency} {net:,.2f} has been sent"
                             + (f" (fee {txn.currency} {float(txn.fee):,.2f})." if txn.fee else "."), "payment")

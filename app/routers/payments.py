@@ -319,6 +319,9 @@ async def payhub_webhook(request: Request, db: Session = Depends(get_db),
             outcome = payment_flows.handle_payhub_charge(db, data["reference"])
         elif event in ("payout.completed", "payout.failed", "payout.rejected") and data.get("id"):
             outcome = payment_flows.handle_payhub_payout(db, data["id"])
+        elif event in ("identity.verified", "identity.failed"):
+            from app.routers.kyc import handle_identity_event
+            outcome = handle_identity_event(db, event, data)
         else:
             outcome = "ignored"
     except Exception as exc:

@@ -56,6 +56,9 @@ def _recompute(db: Session, user: User) -> str:
     docs = db.query(KycDocument).filter(KycDocument.user_id == user.id).all()
     types_verified = {d.type for d in docs if d.status == "verified"}
     should_verify = _complete(types_verified)
+    from app.routers.kyc import bvn_required
+    if should_verify and bvn_required(db, user) and user.bvn_status != "verified":
+        should_verify = False  # Nigerian users also need a verified BVN
     if should_verify and not user.is_kyc_verified:
         user.is_kyc_verified = True
         _notify(db, user.id, "Identity Verified",
@@ -88,6 +91,8 @@ def list_submissions(
                 "id": u.id,
                 "name": f"{u.first_name} {u.last_name}".strip(),
                 "first_name": u.first_name,
+                "bvn_status": u.bvn_status or "not_submitted",
+                "bvn_last4": u.bvn_last4,
                 "last_name": u.last_name,
                 "email": u.email,
                 "country_code": getattr(u, "country_code", None),

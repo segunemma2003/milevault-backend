@@ -133,6 +133,10 @@ class PlatformSettings(Base):
     # Paid by whoever opens a dispute: fixed (fee currency) + % of the disputed amount. 0 = free.
     dispute_fee_fixed = Column(Float, default=0.0)
     dispute_fee_percent = Column(Float, default=0.0)
+    # A copy of every deposit/withdrawal receipt goes here (blank = support_email).
+    receipts_copy_email = Column(String(255), nullable=True)
+    # Nigerian users need a verified BVN (via PayHub/Paystack) to complete KYC.
+    require_bvn = Column(Boolean, default=True)
 
     max_transaction_amount = Column(Float, nullable=True)
     min_transaction_amount = Column(Float, default=1.0)
