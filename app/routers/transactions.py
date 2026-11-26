@@ -1214,6 +1214,14 @@ def _release_milestone_escrow(db: Session, tx: Transaction, milestone: Milestone
         f"'{milestone.title}' is complete and {currency} {amount:.2f} was released to the seller.",
         "transaction", related_item_id=tx.id, related_item_type="transaction",
     )
+    # Ratings: after each milestone of a multi-milestone deal, and once the whole deal is done.
+    what = "the deal" if tx.status == "completed" else f"milestone '{milestone.title}'"
+    if len(all_milestones) > 1 or tx.status == "completed":
+        for uid, other in ((tx.buyer_id, "seller"), (tx.seller_id, "buyer")):
+            if uid:
+                create_notification(db, uid, f"Rate the {other}",
+                                    f"How did {what} in '{tx.title}' go? Rate the {other} — it builds their Trust Score.",
+                                    "transaction", related_item_id=tx.id, related_item_type="transaction")
 
     # Next milestone not fully paid and nothing else paid in escrow → pause the deal until it is.
     if tx.status != "completed":
@@ -1363,6 +1371,16 @@ def report_invalid_delivery(
 class ReviewIn(BaseModel):
     rating: int
     comment: Optional[str] = None
+    milestone_id: Optional[str] = None  # rate one completed milestone; omit to rate the whole (completed) deal
+
+
+def _review_targets(db: Session, tx: Transaction, user_id: str) -> dict:
+    """What this user can still rate on a deal: completed milestones (multi-milestone deals) and the deal."""
+    from app.models.trust import DealReview
+    done = {(r.milestone_id or "deal") for r in db.query(DealReview).filter_by(transaction_id=tx.id, reviewer_id=user_id)}
+    ms = _ordered_milestones(db, tx.id)
+    milestones = [m.id for m in ms if len(ms) > 1 and m.status == "completed" and m.id not in done]
+    return {"milestones": milestones, "deal": tx.status == "completed" and "deal" not in done}
 
 
 @router.post("/{transaction_id}/review", status_code=201)
@@ -1375,21 +1393,34 @@ def leave_review(transaction_id: str, body: ReviewIn, current_user: User = Depen
         raise HTTPException(status_code=404, detail="Transaction not found")
     if current_user.id not in (tx.buyer_id, tx.seller_id):
         raise HTTPException(status_code=403, detail="Only the buyer or seller can review this deal")
-    if tx.status != "completed":
-        raise HTTPException(status_code=409, detail={"error": "NOT_COMPLETED", "message": "You can rate the other party once the deal is completed."})
     if not 1 <= int(body.rating) <= 5:
         raise HTTPException(status_code=422, detail={"error": "INVALID_RATING", "message": "Rating must be 1 to 5 stars."})
-    if db.query(DealReview).filter_by(transaction_id=tx.id, reviewer_id=current_user.id).first():
-        raise HTTPException(status_code=409, detail={"error": "ALREADY_REVIEWED", "message": "You've already rated this deal."})
+    milestone = None
+    if body.milestone_id:
+        milestone = db.query(Milestone).filter(Milestone.id == body.milestone_id, Milestone.transaction_id == tx.id).first()
+        if not milestone:
+            raise HTTPException(status_code=404, detail="Milestone not found")
+        if milestone.status != "completed":
+            raise HTTPException(status_code=409, detail={"error": "NOT_COMPLETED", "message": "You can rate a milestone once it's completed."})
+        what = f"milestone '{milestone.title}'"
+    else:
+        if tx.status != "completed":
+            raise HTTPException(status_code=409, detail={"error": "NOT_COMPLETED", "message": "You can rate the other party once the deal is completed."})
+        what = f"'{tx.title}'"
+    dupe = db.query(DealReview).filter_by(transaction_id=tx.id, reviewer_id=current_user.id,
+                                          milestone_id=body.milestone_id or None).first()
+    if dupe:
+        raise HTTPException(status_code=409, detail={"error": "ALREADY_REVIEWED", "message": "You've already rated this."})
     reviewee_id = tx.seller_id if current_user.id == tx.buyer_id else tx.buyer_id
     role = "seller" if current_user.id == tx.buyer_id else "buyer"
-    db.add(DealReview(transaction_id=tx.id, reviewer_id=current_user.id, reviewee_id=reviewee_id, reviewee_role=role,
-                      rating=int(body.rating), comment=(body.comment or "").strip()[:1000] or None))
+    db.add(DealReview(transaction_id=tx.id, milestone_id=body.milestone_id or None, reviewer_id=current_user.id,
+                      reviewee_id=reviewee_id, reviewee_role=role, rating=int(body.rating),
+                      comment=(body.comment or "").strip()[:1000] or None))
     db.flush()
     reviewee = db.query(User).filter(User.id == reviewee_id).first()
     trust_score.recompute(db, reviewee, f"New {body.rating}-star review")
-    create_notification(db, reviewee_id, "You got a new review",
-                        f"{current_user.first_name} rated you {body.rating}/5 for '{tx.title}'.", "transaction",
+    create_notification(db, reviewee_id, "You got a new rating",
+                        f"{current_user.first_name} rated you {body.rating}/5 for {what}.", "transaction",
                         related_item_id=tx.id, related_item_type="transaction")
     db.commit()
     return {"message": "Thanks — your rating has been recorded."}
@@ -1401,7 +1432,9 @@ def deal_reviews(transaction_id: str, current_user: User = Depends(get_current_u
     tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not tx or current_user.id not in (tx.buyer_id, tx.seller_id):
         raise HTTPException(status_code=404, detail="Transaction not found")
-    rows = db.query(DealReview).filter_by(transaction_id=tx.id).all()
-    return {"can_review": tx.status == "completed" and not any(r.reviewer_id == current_user.id for r in rows),
-            "reviews": [{"reviewer_id": r.reviewer_id, "reviewee_role": r.reviewee_role, "rating": r.rating,
-                         "comment": r.comment, "created_at": r.created_at} for r in rows]}
+    rows = db.query(DealReview).filter_by(transaction_id=tx.id).order_by(DealReview.created_at).all()
+    targets = _review_targets(db, tx, current_user.id)
+    return {"can_review": targets["deal"], "can_review_milestones": targets["milestones"],
+            "reviews": [{"reviewer_id": r.reviewer_id, "mine": r.reviewer_id == current_user.id, "milestone_id": r.milestone_id,
+                         "reviewee_role": r.reviewee_role, "rating": r.rating, "comment": r.comment,
+                         "created_at": r.created_at} for r in rows]}

@@ -342,3 +342,37 @@ def test_counterparty_lookup_and_invite_trust_line(db):
         users.lookup_counterparty("buyer@x.com", b, db)
     line = trust_score.summary_line(db, b)
     assert line.startswith("Trust Score ") and "new to Bondrova" in line
+
+
+def test_ratings_after_each_milestone_and_the_deal(db):
+    from app.models.notification import Notification
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m1, m2) = deal(db, b, s, 100, [("Design", 40), ("Build", 60)])
+    deposit(db, b, "USD", 100)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+    with pytest.raises(HTTPException):                                   # milestone not completed yet
+        T.leave_review(tx.id, T.ReviewIn(rating=5, milestone_id=m1.id), b, db)
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m1.id)); db.commit()
+    assert "Rate the seller" in notes(db, b) and "Rate the buyer" in notes(db, s)
+    r = T.deal_reviews(tx.id, b, db)
+    assert r["can_review_milestones"] == [m1.id] and r["can_review"] is False
+    T.leave_review(tx.id, T.ReviewIn(rating=4, comment="Good design", milestone_id=m1.id), b, db)
+    T.leave_review(tx.id, T.ReviewIn(rating=5, milestone_id=m1.id), s, db)   # seller rates the buyer too
+    with pytest.raises(HTTPException):
+        T.leave_review(tx.id, T.ReviewIn(rating=5, milestone_id=m1.id), b, db)  # once per milestone
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m2.id)); db.commit()
+    r = T.deal_reviews(tx.id, b, db)
+    assert r["can_review_milestones"] == [m2.id] and r["can_review"] is True
+    T.leave_review(tx.id, T.ReviewIn(rating=5), b, db)                   # whole-deal rating
+    db.refresh(s)
+    assert s.rating_count == 2 and s.rating == 4.5
+
+
+def test_single_payment_deal_has_only_the_deal_rating(db):
+    b, s = mk(db, "buyer@x.com"), mk(db, "seller@x.com")
+    tx, (m,) = deal(db, b, s, 20)
+    deposit(db, b, "USD", 20)
+    T.fund_deal(tx.id, FundMilestoneBody(), b, db)
+    T._release_milestone_escrow(db, tx, db.get(Milestone, m.id)); db.commit()
+    r = T.deal_reviews(tx.id, b, db)
+    assert r["can_review_milestones"] == [] and r["can_review"] is True

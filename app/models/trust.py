@@ -1,18 +1,25 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, text
 
 from app.database import Base
 
 
 class DealReview(Base):
-    """A 1–5 star rating one party leaves the other after a completed deal (one each way per deal)."""
+    """A 1–5 star rating one party leaves the other — after each completed milestone (milestone_id set)
+    and once for the whole deal (milestone_id NULL). One per reviewer per milestone / per deal."""
     __tablename__ = "deal_reviews"
-    __table_args__ = (UniqueConstraint("transaction_id", "reviewer_id", name="uq_review_per_party"),)
+    __table_args__ = (
+        Index("uq_review_deal", "transaction_id", "reviewer_id", unique=True,
+              postgresql_where=text("milestone_id IS NULL"), sqlite_where=text("milestone_id IS NULL")),
+        Index("uq_review_milestone", "milestone_id", "reviewer_id", unique=True,
+              postgresql_where=text("milestone_id IS NOT NULL"), sqlite_where=text("milestone_id IS NOT NULL")),
+    )
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     transaction_id = Column(String, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    milestone_id = Column(String, ForeignKey("milestones.id", ondelete="CASCADE"), nullable=True, index=True)
     reviewer_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     reviewee_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     reviewee_role = Column(String(10), nullable=False)  # buyer | seller

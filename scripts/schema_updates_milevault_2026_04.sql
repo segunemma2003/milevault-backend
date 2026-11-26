@@ -107,3 +107,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS trust_score INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trust_breakdown JSON;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trust_updated_at TIMESTAMP;
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS ruled_against VARCHAR(10);
+
+-- Ratings after each milestone as well as the whole deal
+ALTER TABLE deal_reviews ADD COLUMN IF NOT EXISTS milestone_id VARCHAR REFERENCES milestones(id) ON DELETE CASCADE;
+ALTER TABLE deal_reviews DROP CONSTRAINT IF EXISTS uq_review_per_party;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_review_deal ON deal_reviews(transaction_id, reviewer_id) WHERE milestone_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_review_milestone ON deal_reviews(milestone_id, reviewer_id) WHERE milestone_id IS NOT NULL;
