@@ -166,6 +166,8 @@ def my_trust_score(current_user: User = Depends(get_current_user), db: Session =
                .order_by(DealReview.created_at.desc()).limit(20).all())
     return {
         "score": current_user.trust_score, "band": trust_score.band(current_user.trust_score),
+        "band_meaning": trust_score.meaning(current_user.trust_score),
+        "levels": [{"name": n, "from": f, "meaning": trust_score.BAND_MEANING[n]} for f, n in reversed(trust_score.BANDS)],
         "min": trust_score.MIN_SCORE, "max": trust_score.MAX_SCORE, "breakdown": current_user.trust_breakdown,
         "deal_limit_share": trust_score.deal_cap_multiplier(current_user.trust_score),
         "history": [{"score": e.score, "change": e.change, "reason": e.reason, "at": e.created_at} for e in history],
@@ -180,5 +182,6 @@ def user_trust(user_id: str, current_user: User = Depends(get_current_user), db:
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     b = u.trust_breakdown or {}
-    return {"score": u.trust_score, "band": trust_score.band(u.trust_score), "completed_deals": b.get("completed_deals", 0),
+    return {"score": u.trust_score, "band": trust_score.band(u.trust_score), "band_meaning": trust_score.meaning(u.trust_score),
+            "completed_deals": b.get("completed_deals", 0),
             "rating": u.rating, "rating_count": u.rating_count, "is_kyc_verified": u.is_kyc_verified}

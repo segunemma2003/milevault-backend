@@ -22,6 +22,16 @@ from sqlalchemy.orm import Session
 MIN_SCORE, MAX_SCORE = 300, 850
 WEIGHTS = {"history": 0.35, "reliability": 0.30, "disputes": 0.20, "reviews": 0.10, "verification": 0.05}
 BANDS = [(800, "Excellent"), (740, "Very good"), (670, "Good"), (580, "Fair"), (0, "Building")]
+# What each level means, in plain words — shown wherever a score is shown.
+BAND_MEANING = {
+    "Building": "New on Bondrova or few completed deals so far. Not a red flag — there's just less history to go on, "
+                "so a smaller first milestone is sensible.",
+    "Fair": "Has completed some deals, but with a few problems such as late deliveries, revisions or a lost dispute. "
+            "Check their reviews.",
+    "Good": "A solid record of completed deals with few problems.",
+    "Very good": "Consistently completes deals on time and gets good reviews.",
+    "Excellent": "One of Bondrova's most reliable members — a long record, great reviews and no disputes lost.",
+}
 REVIEW_PRIOR_MEAN, REVIEW_PRIOR_WEIGHT = 3.5, 3
 
 TIPS = {
@@ -36,6 +46,10 @@ TIPS = {
 def band(score: int | None) -> str:
     s = score or MIN_SCORE
     return next(name for floor, name in BANDS if s >= floor)
+
+
+def meaning(score: int | None) -> str:
+    return BAND_MEANING[band(score)]
 
 
 def _to_usd(db: Session, amount: float, currency: str) -> float:
@@ -171,7 +185,7 @@ def summary_line(db: Session, user) -> str:
         parts.append(f"{float(user.rating or 0):.1f}★ from {int(user.rating_count)} review{'s' if user.rating_count != 1 else ''}")
     parts.append(f"{deals} completed deal{'s' if deals != 1 else ''}" if deals else "new to Bondrova — no completed deals yet")
     parts.append("identity verified" if user.is_kyc_verified else "identity not yet verified")
-    return " · ".join(parts)
+    return " · ".join(parts) + f". What this means: {meaning(user.trust_score)}"
 
 
 def public_profile(db: Session, user) -> dict:
@@ -183,7 +197,7 @@ def public_profile(db: Session, user) -> dict:
     return {
         "registered": True,
         "name": f"{(user.first_name or '').strip()} {last[:1] + '.' if last else ''}".strip(),
-        "trust_score": user.trust_score, "band": band(user.trust_score),
+        "trust_score": user.trust_score, "band": band(user.trust_score), "band_meaning": meaning(user.trust_score),
         "rating": float(user.rating or 0), "rating_count": int(user.rating_count or 0),
         "completed_deals": b.get("completed_deals", 0), "disputes_lost": b.get("disputes_lost", 0),
         "is_kyc_verified": bool(user.is_kyc_verified), "bvn_verified": user.bvn_status == "verified",

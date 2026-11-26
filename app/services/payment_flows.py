@@ -232,11 +232,8 @@ def handle_payhub_charge(db: Session, reference: str) -> str:
         # This notification is also emailed (Bondrova-branded) — it is the user's receipt.
         added = float(ledger.quantize(txn.amount, "NGN", db))
         fee = float(txn.fee or 0)
-        receipt = f"₦{added:,.2f} has been added to your wallet."
-        if fee > 0:
-            receipt += (f" You paid ₦{added + fee:,.2f} at checkout: ₦{added:,.2f} to your wallet plus "
-                        f"₦{fee:,.2f} payment processing fees.")
-        receipt += f" Reference: {reference}."
+        # Customer receipt: what landed in the wallet (no fee breakdown — that's shown on the deposit form).
+        receipt = f"₦{added:,.2f} has been added to your wallet. Reference: {reference}."
         create_notification(db, txn.user_id, "Deposit received — receipt", receipt, "payment")
         _receipt_copy(db, txn.user_id, "Deposit", [("Added to wallet", f"NGN {added:,.2f}"),
                                                    ("Paid at checkout", f"NGN {added + fee:,.2f}"),
